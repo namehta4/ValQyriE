@@ -9,8 +9,11 @@ CPU-only, exact-statevector implementations of the **Variational Quantum Eigenso
 * Benchmark molecules (H2, HeH+, LiH, BeH2, H2O, NH3, CH4, HF, N2, CO, O2 triplet, H4/H6 chains, H4 ring),
   any PySCF basis, any active space, or any geometry you provide.
 * Every result is validated against exact diagonalisation (FCI within the active space).
-* Pure Python (NumPy / SciPy / PySCF / PyTorch-CPU), so it runs unchanged on **x86_64 and arm64**
-  (Linux, macOS; Windows via WSL2).
+* Pure Python (NumPy / SciPy / PySCF / PyTorch-CPU) with no compiled code of its own and nothing tied
+  to one CPU model. The NumPy/SciPy/PyTorch wheels pick SSE/AVX2/AVX-512/NEON kernels at runtime, so
+  one install runs on AMD EPYC, Intel Xeon, ARM servers and Apple silicon (Linux, macOS; Windows via
+  WSL2). The test suite passes on arm64 macOS and on x86_64 Linux, the latter run under emulation.
+  NumPy 1.24+ and 2.x are both supported.
 
 ```
 ValQyriE/
@@ -34,7 +37,7 @@ ValQyriE/
 python3 -m venv .venv && source .venv/bin/activate
 # Linux: install CPU-only PyTorch first, which avoids the multi-GB CUDA build (macOS wheels are already CPU-only)
 pip install torch --index-url https://download.pytorch.org/whl/cpu
-pip install -e ".[gqe,test]"
+pip install -e ".[gqe,test]"        # add ,crosscheck for the OpenFermion cross-check
 pytest -q -m "not slow"
 ```
 
@@ -84,6 +87,12 @@ generically as `c_p = Z^{parity set} X^{update set}` and `d_p = i c_p Z^{occupat
 
 Validation (in `tests/`): canonical anticommutation relations, ⟨HF|H|HF⟩ = E_SCF and λ_min = E_CASCI to
 1e-12 Ha for every mapping, the 15-term H2 and 631-term LiH Hamiltonians, and ⟨S²⟩ = 2 for triplet O2.
+`tests/test_openfermion.py` runs when `pip install -e ".[crosscheck]"` is installed. It hands the same
+integrals to OpenFermion and checks the following against our code:
+* term-by-term agreement (≤ 1e-10) of the JW, BK (`bravyi_kitaev`) and parity (binary-code) Hamiltonians;
+* every UCCSD excitation generator;
+* identical spectra against OpenFermion's Fenwick-tree BK, which uses a different tree layout;
+* ground-state energies from OpenFermion's own sector solver.
 
 ### Simulator
 Every fermionic or qubit excitation generator G = T − T† is anti-Hermitian, and its Pauli strings

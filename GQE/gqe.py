@@ -149,7 +149,7 @@ class GQE:
                 elite = sorted(buffer.items(), key=lambda kv: kv[1])[:cfg.replay_size]
                 train_s = torch.cat([seqs, torch.tensor([list(s) for s, _ in elite])])
                 train_e = np.concatenate([energies, [e for _, e in elite]])
-            e_t = torch.tensor(train_e, dtype=torch.float32)
+            e_t = torch.tensor(np.asarray(train_e, dtype=float).tolist(), dtype=torch.float32)
             self.model.train()
             for _ in range(cfg.grad_steps):
                 self.optim.zero_grad()

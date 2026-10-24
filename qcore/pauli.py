@@ -23,8 +23,16 @@ import scipy.sparse as sp
 MAX_QUBITS = 32  # x, z packed into one uint64 key for deduplication
 
 
-def popcount(a: np.ndarray) -> np.ndarray:
-    return np.bitwise_count(np.asarray(a, dtype=np.uint64)).astype(np.int64)
+if hasattr(np, "bitwise_count"):  # NumPy >= 2.0
+    def popcount(a: np.ndarray) -> np.ndarray:
+        return np.bitwise_count(np.asarray(a, dtype=np.uint64)).astype(np.int64)
+else:  # NumPy 1.x (e.g. Intel macOS, where the last PyTorch wheels require NumPy < 2)
+    _BYTE_POPCOUNT = np.array([bin(i).count("1") for i in range(256)], dtype=np.int64)
+
+    def popcount(a: np.ndarray) -> np.ndarray:
+        a = np.asarray(a, dtype=np.uint64)
+        flat = np.ascontiguousarray(a.reshape(-1))
+        return _BYTE_POPCOUNT[flat.view(np.uint8)].reshape(-1, 8).sum(axis=1).reshape(a.shape)
 
 
 def parity_sign(a: np.ndarray) -> np.ndarray:

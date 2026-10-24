@@ -1,5 +1,5 @@
 # Core (pure-Python; wheels exist for x86_64 and arm64 on Linux and macOS)
-numpy>=2.0
+numpy>=1.24
 scipy>=1.11
 pyscf>=2.4
 pytest>=7
