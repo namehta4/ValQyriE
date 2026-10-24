@@ -1,0 +1,8 @@
+# Core (pure-Python; wheels exist for x86_64 and arm64 on Linux and macOS)
+numpy>=2.0
+scipy>=1.11
+pyscf>=2.4
+pytest>=7
+# GQE only. On Linux use the CPU-only wheel index to avoid the multi-GB CUDA build:
+#   pip install torch --index-url https://download.pytorch.org/whl/cpu
+torch>=2.2

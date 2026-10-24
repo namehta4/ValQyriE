@@ -1,0 +1,10 @@
+# conda env create -f environment.yml   (conda-forge has x86_64 + arm64 builds of everything)
+name: valqyrie
+channels: [conda-forge]
+dependencies:
+  - python=3.12
+  - numpy>=2.0
+  - scipy>=1.11
+  - pyscf>=2.4
+  - pytorch>=2.2
+  - pytest

@@ -1,0 +1,28 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "valqyrie"
+version = "0.1.0"
+description = "CPU-only, exact-statevector VQE and GQE for molecular ground states"
+readme = "README.md"
+license = { file = "LICENSE" }
+requires-python = ">=3.10"
+# Pure Python: every dependency ships wheels for x86_64 and arm64 (Linux, macOS).
+dependencies = [
+    "numpy>=2.0",   # np.bitwise_count
+    "scipy>=1.11",
+    "pyscf>=2.4",
+]
+
+[project.optional-dependencies]
+gqe = ["torch>=2.2"]
+test = ["pytest>=7"]
+
+[tool.setuptools.packages.find]
+include = ["qcore*", "VQE*", "GQE*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = ["slow: longer end-to-end runs (deselect with -m 'not slow')"]
