@@ -8,6 +8,7 @@ COPY pyproject.toml README.md LICENSE ./
 COPY qcore ./qcore
 COPY VQE ./VQE
 COPY GQE ./GQE
+COPY stress ./stress
 COPY tests ./tests
 COPY examples ./examples
 RUN pip install torch --index-url https://download.pytorch.org/whl/cpu \

@@ -20,9 +20,11 @@ dependencies = [
 gqe = ["torch>=2.2"]
 test = ["pytest>=7"]
 crosscheck = ["openfermion>=1.6"]  # tests/test_openfermion.py (skipped if absent)
+mpi = ["mpi4py>=3.1"]               # multi-node stress runs (needs a system MPI)
+stress = ["threadpoolctl>=3"]       # reports BLAS thread counts
 
 [tool.setuptools.packages.find]
-include = ["qcore*", "VQE*", "GQE*"]
+include = ["qcore*", "VQE*", "GQE*", "stress*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

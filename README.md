@@ -27,6 +27,7 @@ ValQyriE/
 │   └── circuit.py      exact statevector circuits + adjoint-method gradients
 ├── VQE/              VQE, ansatze, ADAPT-VQE, CLI (python -m VQE)
 ├── GQE/              GPT model, operator pool, GQE training loop, CLI (python -m GQE)
+├── stress/           verified CPU stress test + system ceilings (python -m stress)
 ├── examples/         benchmark.py, dissociation_curve.py
 └── tests/            validation suite (pytest)
 ```
@@ -166,6 +167,82 @@ circuit → after angle refinement:
 | H2O | 7.3e-03 → 1.9e-03 | 5.8e-03 → 7.9e-04 | 9.5e-03 → 1.3e-03 |
 
 Each GQE run takes about 70 s on one CPU thread.
+
+## CPU stress test and system ceilings (`stress/`)
+
+`python -m stress` turns the solvers' numerical kernels into a **self-verifying CPU stress test**, built
+for qualifying cluster hardware (e.g. Student Cluster Competition nodes). Every result is checked
+exactly or against physics, so a marginal CPU, a bad core, an unstable overclock/undervolt, overheating
+or memory errors show up as **failures** rather than as a slightly lower benchmark number.
+
+```bash
+python -m stress info                         # hardware, ISA, runtime SIMD, estimated ceilings (no load)
+python -m stress peak                         # measure what the system can achieve at most
+python -m stress run --duration 300           # 4 workloads x 5 min, one pinned worker per physical core
+python -m stress run --mode mixed --duration 3600 --size dram -o burnin.json   # 1 h burn-in
+mpirun -np 4 --map-by ppr:1:node python -m stress run --mpi -o cluster.json    # 4 nodes, one rank each
+```
+
+The exit code is 0 for PASS/WARN and 1 for FAIL, so runs can be scripted (e.g. after every BIOS change).
+
+### Workloads
+
+All workers get identical inputs, so their results must also agree **across cores and nodes**. A core
+whose bit-exact fingerprint differs from the majority is named in the report.
+
+| workload | stresses | verification on every step |
+|---|---|---|
+| `dgemm` | FP64 FMA units via BLAS (AVX2/AVX-512/NEON/SVE) | small-integer matrices make A·B exact in FP64, checked exactly with integer Freivalds products (independent of BLAS) |
+| `statevector` | irregular full-state gathers: caches, DRAM, TLB | random circuit U then U†: the state must come back to within 1e-10 in norm |
+| `vqe` | the production UCCSD energy + adjoint-gradient path (sparse matvec, complex arithmetic) | energy/gradient vs reference ≤ 1e-9, variational bound E ≥ E_FCI |
+| `transformer` | FP32 GEMM / oneDNN or Accelerate (the GQE model) | bit-identical loss and gradients on every step, finite values |
+
+Each workload is also checked against its own first result, bit for bit. `--size cache|llc|dram`
+chooses working sets that fit in L2, fit in L3, or spill to DRAM. `--mode phases` runs one workload
+at a time to give clean per-workload numbers; `--mode mixed` has every core cycle through all of them
+for maximum variation in thermal and power load.
+
+### "What the system can achieve at most"
+
+`peak` (also run at the start of `run` unless `--no-peak`) reports:
+
+* **Theoretical FP64/FP32 peak** = physical cores × max clock × FLOPs/cycle. FLOPs/cycle is derived
+  from the ISA and microarchitecture, for example:
+  * AVX-512 with 2 FMA units: 32;
+  * AMD Zen 4: 16;
+  * AVX2: 16;
+  * Neoverse V2: 16.
+
+  This is an upper bound. Clocks under heavy AVX load sit below max boost, so pass the all-core AVX
+  clock as `--freq-ghz`, and use `--flops-per-cycle` for SKUs the table doesn't know.
+* **Measured ceilings**:
+  * multithreaded BLAS DGEMM, one DGEMM per core (single core and all cores), and PyTorch FP32 GEMM;
+  * triad memory bandwidth on one core and on all cores, counting the 40 B per element NumPy actually
+    moves. To get percent-of-theoretical, pass `--mem-bw-gbs` = sockets × channels × MT/s × 8 B
+    (e.g. EPYC 9004, 12 × DDR5-4800 ≈ 461 GB/s per socket).
+* **Largest problem the node can hold** (80% of RAM): statevector qubits for the state alone, for this
+  simulator, and for VQE with its sparse Hamiltonian.
+* Each stress workload's throughput as a percentage of those ceilings.
+
+On Linux the run also samples clock speed, temperature (`coretemp`/`k10temp` hwmon) and package power
+from RAPL, which needs root on most kernels. Everything degrades gracefully when the data isn't readable.
+
+### Using it for SCC
+
+1. Run `info` and `peak` on every node first. Nodes of the same SKU should agree to within a few
+   percent; an outlier usually means a DIMM in the wrong slot (fewer memory channels), BIOS
+   power/C-state settings, or thermal throttling.
+2. Do a `--mode mixed` burn-in of ≥ 1 h after every hardware, BIOS, firmware or tuning change. Any FAIL
+   or "results differ" warning disqualifies that configuration.
+3. Under a power cap, compare GFLOP/s per watt (needs root for RAPL) across BIOS settings, frequency
+   caps and SMT (`--workers logical`).
+4. Workers allocate their arrays after pinning, so on multi-socket and NUMA nodes memory lands on
+   the local node through first-touch allocation.
+
+This tool is not a maximum-power burner like HPL or Prime95: NumPy's multi-pass kernels draw less
+power. Use it to find wrong answers and stability problems; use HPL (which SCC runs anyway) for the
+thermal worst case. On Apple silicon, BLAS runs on the AMX/SME matrix unit, so measured GEMM can
+exceed the vector-ISA estimate; the tool says so when it happens.
 
 ## Limits and scope
 

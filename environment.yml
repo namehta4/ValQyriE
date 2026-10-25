@@ -8,3 +8,4 @@ dependencies:
   - pyscf>=2.4
   - pytorch>=2.2
   - pytest
+  # - mpi4py   # optional: multi-node stress runs (python -m stress run --mpi)
