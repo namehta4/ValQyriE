@@ -142,9 +142,7 @@ class OrbitalOptimizedVQE:
         mc.conv_tol = self.conv_tol
         mc.max_cycle_macro = self.max_macro
         mc.internal_rotation = self.internal_rotation
-        mo = p.mf.mo_coeff.copy()
-        if p.active_choice is not None:
-            mo = mc.sort_mo(p.active_choice.orbitals, base=0)
+        mo = np.array(getattr(p, "mo_coeff", p.mf.mo_coeff), copy=True)  # incl. MP2 / AVAS selections
         if self.initial_orbitals != "hf":
             nc = mc.ncore
             n_docc = min(p.n_alpha, p.n_beta)  # doubly occupied active orbitals; open shells stay put

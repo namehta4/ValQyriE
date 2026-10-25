@@ -7,3 +7,6 @@ dist/
 .pytest_cache/
 *.chk
 results/
+
+# judges-only material (oracle, hidden cases): never commit
+judges/

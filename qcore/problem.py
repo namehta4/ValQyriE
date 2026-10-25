@@ -33,13 +33,20 @@ class MolecularProblem:
     active_electrons, active_orbitals : active space; ``None`` = all electrons/orbitals.
     auto_active : ``AutoActiveSpace`` to choose the active orbitals from MP2 occupations
         instead (``qcore.active_space``); overrides ``active_electrons``/``active_orbitals``.
+    avas : AO labels (e.g. ["C 2pz"]) to choose the active space by projection onto those atomic
+        orbitals (PySCF AVAS; occupied and virtual orbitals are rotated separately, so the HF
+        determinant is unchanged); overrides ``active_electrons``/``active_orbitals``.
+    compute_fci : run the exact (CASCI) reference; False leaves ``e_fci`` = nan, for active
+        spaces too large to diagonalize quickly.
     mapping : "jw", "bk" or "parity".
     """
 
     def __init__(self, geometry, basis: str = "sto-3g", charge: int = 0, spin: int = 0,
                  active_electrons: int | None = None, active_orbitals: int | None = None,
                  mapping: str = "jw", name: str | None = None, unit: str = "Angstrom",
-                 auto_active: AutoActiveSpace | None = None, verbose: bool = False):
+                 auto_active: AutoActiveSpace | None = None, avas: list[str] | None = None,
+                 compute_fci: bool = True,
+                 verbose: bool = False):
         from pyscf import ao2mo, gto, mcscf, scf
 
         self.name = name or "molecule"
@@ -61,6 +68,12 @@ class MolecularProblem:
         n_elec = self.mol.nelectron
         n_mo = mf.mo_coeff.shape[1]
         self.active_choice = None
+        self.avas = None
+        avas_mo = None
+        if avas is not None:
+            from pyscf.mcscf import avas as _avas
+            active_orbitals, active_electrons, avas_mo = _avas.avas(mf, list(avas), verbose=0)
+            self.avas = tuple(avas)
         if auto_active is not None:
             self.active_choice = select_active_space(mf, auto_active)
             active_electrons = self.active_choice.n_electrons
@@ -82,13 +95,16 @@ class MolecularProblem:
         cas.verbose = 0
         if self.active_choice is not None:  # possibly non-contiguous canonical orbitals
             cas.mo_coeff = cas.sort_mo(self.active_choice.orbitals, base=0)
+        elif avas_mo is not None:
+            cas.mo_coeff = avas_mo
+        self.mo_coeff = cas.mo_coeff  # orbitals the active space is defined in
         h1, e_core = cas.get_h1eff()
         self.h1 = np.asarray(h1)
         self.e_core = float(e_core)
         self.h2 = ao2mo.restore(1, cas.get_h2eff(), ncas)
         # exact lowest energy in the active space for this (N_alpha, N_beta) sector --
         # the same sector the qubit algorithms are compared against
-        self.e_fci = float(cas.kernel()[0])
+        self.e_fci = float(cas.kernel()[0]) if compute_fci else float("nan")
         self.mapping: FermionQubitMapping = get_mapping(mapping, self.n_qubits)
 
     # --------------------------------------------------------- constructors
@@ -101,6 +117,8 @@ class MolecularProblem:
         r = spec.r_eq if bond_length is None else bond_length
         active_space = parse_active_space(active_space)
         if active_space == "default":
+            if spec.avas:
+                kw.setdefault("avas", spec.avas)
             active_space = spec.active
         elif active_space == "full":
             active_space = None

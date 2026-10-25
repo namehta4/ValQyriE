@@ -59,7 +59,8 @@ to experiment depends on those two choices.
   symmetry-preserving gate fabric, LUCJ, SPA, ADAPT-VQE (fermionic / QEB / qubit / CEO pools,
   optionally TETRIS), or your own generators; any of them with orbital optimization (oo-VQE).
 * Any of Jordan-Wigner, Bravyi-Kitaev or parity encodings.
-* Benchmark molecules (H2, HeH+, LiH, BeH2, H2O, NH3, CH4, HF, N2, CO, O2 triplet, H4/H6 chains, H4 ring),
+* Benchmark molecules (H2, HeH+, LiH, BeH2, H2O, NH3, CH4, HF, N2, CO, O2 triplet, H4/H6 chains, H4 ring,
+  anthracene),
   any PySCF basis, any active space, or any geometry you provide.
 * Every result is validated against exact diagonalisation (FCI within the active space).
 * Pure Python (NumPy / SciPy / PySCF / PyTorch-CPU) with no compiled code of its own and nothing tied
@@ -75,7 +76,7 @@ ValQyriE/
 │   ├── mappings.py     JW / BK / parity as GF(2) linear encodings
 │   ├── hamiltonian.py  second-quantised H -> qubit H; N, S_z, S^2 operators
 │   ├── problem.py      MolecularProblem: PySCF RHF/ROHF, CASCI active space, references
-│   ├── molecules.py    molecule library (experimental r_e geometries)
+│   ├── molecules.py    molecule library (experimental r_e geometries; idealized anthracene)
 │   ├── excitations.py  fermionic / qubit excitation generators, operator pools, screening
 │   ├── active_space.py opt-in MP2 active-space selection
 │   ├── fci_interface.py qubit state <-> PySCF CI vector, density matrices
@@ -83,6 +84,7 @@ ValQyriE/
 ├── VQE/              VQE, ansatze, ADAPT-VQE (CEO, TETRIS), orbital-optimized VQE, CLI (python -m VQE)
 ├── GQE/              GPT model, operator pool, GQE training loop, CLI (python -m GQE)
 ├── stress/           verified CPU stress test + system ceilings (python -m stress)
+├── bench/            SCC performance-challenge harness: cases, plug-in interface, gate (python -m bench)
 ├── examples/         benchmark.py, dissociation_curve.py, stress/*.json case files
 └── tests/            validation suite (pytest)
 ```
@@ -352,7 +354,8 @@ always filled (core) or always empty. Choices (`--active` on the command line, `
 stress case file):
 
 * `default` (**the default**): the hand-picked active space listed for each library molecule (≤ 14
-  qubits in STO-3G).
+  qubits in STO-3G), except anthracene, whose default is its 14 π orbitals chosen by PySCF's AVAS
+  (14e, 14o; 28 qubits).
 * `full`: all electrons and orbitals.
 * `NELEC,NORB` (`[NELEC, NORB]` in JSON): the NORB orbitals nearest the highest occupied one, by
   Hartree-Fock orbital energy.
@@ -594,6 +597,53 @@ highest possible power draw. Python/NumPy overhead keeps its power and heat belo
 Prime95. Use both: HPL (which SCC runs anyway) shows the cluster survives the thermal and power worst
 case, and `python -m stress run` shows it still gives correct answers. On Apple silicon, BLAS runs on the AMX/SME matrix unit, so measured GEMM can
 exceed the vector-ISA estimate; the tool says so when it happens.
+
+## SCC performance challenge (`bench/`)
+
+`python -m bench` is the harness for the six-stage performance challenge. Teams make the UCCSD
+energy + gradient evaluation as fast as their cluster allows, and every result has to reproduce
+stored reference answers before its time counts.
+
+```bash
+python -m bench list                                        # the cases
+python -m bench run h2o-16q                                 # reference code: correctness gate + timing
+python -m bench run h2o-24q --impl mycode.py:MyEvaluator -o result.json
+python -m bench vqe h2o-24q --impl mycode.py:MyEvaluator    # full optimization, time to solution
+python -m bench export h2o-24q -o cases/                    # .npz + .json for non-Python codes
+mpirun -np 8 python -m bench run anthracene-28q --impl mymod:Dist --mpi
+```
+
+| case | role | qubits | parameters |
+|---|---|---|---|
+| `lih-12q` | development | 12 | 92 |
+| `h2o-16q` | development | 16 | 360 |
+| `h2o-20q` | development | 20 | 804 |
+| `h2o-24q` | fixed case: H2O / 6-31G, O 1s frozen, (8e, 12o) | 24 | 1,424 |
+| `anthracene-28q` | stretch case: anthracene π system, (14e, 14o) by AVAS | 28 | 3,381 |
+
+**Starter template.** `examples/bench/my_evaluator.py` reproduces the reference with its three hot
+kernels (rotation, H psi, inner products) as separate methods to replace one at a time; copy it
+and run `python -m bench run lih-12q --impl examples/bench/my_evaluator.py:MyEvaluator`.
+
+**The interface.** An implementation is a Python class with `__init__(self, case, comm=None)`
+and `energy_and_gradient(self, theta) -> (float, ndarray)`. It may wrap C++, Fortran, CUDA/HIP,
+Kokkos or SYCL code through pybind11, ctypes or cffi. `case` (`bench.cases.CaseData`) holds the
+active-space integrals `h1`, `h2` (chemists' notation), `e_core`, the excitation list in parameter
+order and the Hartree-Fock occupation. The exact definition of the circuit (Jordan-Wigner,
+interleaved spin orbitals, operator ordering) is in the docstring of `bench/cases.py` and in every
+exported `.json`. Setup in `__init__` is timed separately. Under `--mpi` every rank calls
+`energy_and_gradient` with the same θ and must return the complete result.
+
+**The correctness gate** (`bench/gate.py`): at three stored parameter points (θ = 0, and two
+random points), the energy must match to 1e-10 Ha and every gradient component to 1e-8, and the
+energy must not fall below E_FCI. `bench vqe` runs BFGS from θ = 0 with tolerance 1e-10 (the
+settings of `VQE`) and must reach the stored final energy to 1e-7 Ha. Judges run a hidden case with
+`--case-file` and `--reference`.
+
+The reference implementation (`bench.interface.ReferenceEvaluator`) is the ValQyriE code as it
+stands: the full 2ⁿ statevector, with a sparse Hamiltonian up to 20 qubits and the matrix-free
+Pauli-sum product above. On the 24-qubit case it needs roughly 45 minutes per evaluation on one
+core, and the 28-qubit case is out of its reach: that is the baseline the stages improve on.
 
 ## Limits and scope
 

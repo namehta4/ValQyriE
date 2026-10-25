@@ -22,6 +22,7 @@ class MoleculeSpec:
     charge: int = 0
     spin: int = 0  # 2S = N_alpha - N_beta
     active: tuple[int, int] | None = None  # (electrons, spatial orbitals); None = full
+    avas: tuple[str, ...] | None = None    # default active space by AO projection (PySCF AVAS) instead
     note: str = ""
     aliases: tuple[str, ...] = field(default_factory=tuple)
 
@@ -77,6 +78,31 @@ def _tetrahedral_xh4(x: str):
     return geo
 
 
+def _acene(n_rings: int):
+    """Planar acene (anthracene for 3 rings) in the xy plane: regular hexagons with C-C = r,
+    fused along x, C-H = 1.09 A pointing away from the neighbouring carbons. An idealized
+    geometry, fully specified so that every machine builds exactly the same molecule."""
+    def geo(r, ch=1.09):
+        s3 = np.sqrt(3)
+        carbons = []
+        for k in range(n_rings):
+            cx = (k - (n_rings - 1) / 2) * r * s3
+            for j in range(6):
+                a = np.pi / 6 + j * np.pi / 3
+                p = (round(cx + r * np.cos(a), 8), round(r * np.sin(a), 8))
+                if p not in carbons:
+                    carbons.append(p)
+        out = [("C", (x, y, 0.0)) for x, y in carbons]
+        for x, y in carbons:
+            nb = [q for q in carbons if 0 < np.hypot(q[0] - x, q[1] - y) < 1.1 * r]
+            if len(nb) == 2:
+                v = np.array([x, y]) - np.mean(nb, axis=0)
+                v /= np.linalg.norm(v)
+                out.append(("H", (x + ch * v[0], y + ch * v[1], 0.0)))
+        return out
+    return geo
+
+
 LIBRARY: dict[str, MoleculeSpec] = {s.name.lower(): s for s in [
     MoleculeSpec("H2", _diatomic("H", "H"), 0.7414),
     MoleculeSpec("HeH+", _diatomic("He", "H"), 0.7743, charge=1, note="r_e from ab initio (Kolos & Peek)"),
@@ -95,6 +121,9 @@ LIBRARY: dict[str, MoleculeSpec] = {s.name.lower(): s for s in [
     MoleculeSpec("H4", _linear_chain(4), 1.0, note="linear chain, r = H-H spacing"),
     MoleculeSpec("H6", _linear_chain(6), 1.0, note="linear chain, r = H-H spacing"),
     MoleculeSpec("H4-ring", _ring(4), 1.0, note="square H4, r = side length"),
+    MoleculeSpec("Anthracene", _acene(3), 1.40, avas=("C 2pz",),
+                 note="idealized planar geometry (r = C-C = 1.40 A, C-H = 1.09 A); default active "
+                      "space = the 14 pi orbitals (14e, 14o) selected by AVAS on C 2pz"),
 ]}
 
 
