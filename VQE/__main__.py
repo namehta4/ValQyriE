@@ -5,7 +5,8 @@ import argparse
 import json
 import sys
 
-from qcore import MolecularProblem, list_molecules
+from qcore import MolecularProblem, active_space, list_molecules
+from qcore.excitations import SCREEN_TOL
 
 from .adapt import AdaptVQE
 from .ansatz import ANSATZE, get_ansatz
@@ -18,12 +19,13 @@ def main(argv=None):
     ap.add_argument("--bond-length", type=float, default=None, help="Angstrom (default: experimental r_e)")
     ap.add_argument("--basis", default="sto-3g")
     ap.add_argument("--mapping", default="jw", choices=["jw", "bk", "parity"])
-    ap.add_argument("--active", default="default",
-                    help='"default", "full", or "NELEC,NORB" (e.g. 4,4)')
+    active_space.add_cli_arguments(ap)
     ap.add_argument("--ansatz", default="uccsd", help=f"{sorted(ANSATZE)} or 'adapt'")
     ap.add_argument("--pool", default="fermionic", help="ADAPT pool: fermionic|qeb|qubit|generalized")
     ap.add_argument("--layers", type=int, default=None, help="HEA layers / k for k-UpCCGSD")
     ap.add_argument("--reps", type=int, default=None, help="UCC repetitions")
+    ap.add_argument("--screen", action="store_true",
+                    help="drop symmetry-forbidden doubles (uccsd, uccd, quccsd)")
     ap.add_argument("--optimizer", default="BFGS")
     ap.add_argument("--maxiter", type=int, default=1000)
     ap.add_argument("--number-penalty", type=float, default=0.0)
@@ -33,7 +35,7 @@ def main(argv=None):
     ap.add_argument("-v", "--verbose", action="store_true")
     a = ap.parse_args(argv)
 
-    active = a.active if a.active in ("default", "full") else tuple(int(v) for v in a.active.split(","))
+    active = active_space.from_cli(a)
     prob = MolecularProblem.from_library(a.molecule, bond_length=a.bond_length, basis=a.basis,
                                          mapping=a.mapping, active_space=active)
     print(prob.summary())
@@ -47,6 +49,10 @@ def main(argv=None):
             kw["k" if a.ansatz.lower() in ("kupccgsd", "upccgsd") else "layers"] = a.layers
         if a.reps is not None:
             kw["reps"] = a.reps
+        if a.screen:
+            if a.ansatz.lower() not in ("uccsd", "uccd", "quccsd"):
+                raise ValueError(f"--screen applies to uccsd, uccd and quccsd, not {a.ansatz}")
+            kw["screen_tol"] = SCREEN_TOL
         res = VQE(prob, get_ansatz(a.ansatz, **kw), optimizer=a.optimizer, maxiter=a.maxiter,
                   number_penalty=a.number_penalty, spin_penalty=a.spin_penalty, seed=a.seed,
                   verbose=a.verbose).run()

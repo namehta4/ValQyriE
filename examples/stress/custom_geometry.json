@@ -1,0 +1,13 @@
+{
+  "workloads": ["vqe"],
+  "duration": 600,
+  "vqe": {
+    "name": "C2H4",
+    "geometry": "C 0 0 0.6695; C 0 0 -0.6695; H 0 0.9289 1.2321; H 0 -0.9289 1.2321; H 0 0.9289 -1.2321; H 0 -0.9289 -1.2321",
+    "charge": 0,
+    "spin": 0,
+    "basis": "sto-3g",
+    "active_space": [6, 7],
+    "mapping": "jw"
+  }
+}

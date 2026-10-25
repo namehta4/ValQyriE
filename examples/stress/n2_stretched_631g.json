@@ -1,0 +1,10 @@
+{
+  "workloads": ["vqe"],
+  "duration": 600,
+  "vqe": {
+    "molecule": "N2",
+    "bond_length": 1.5,
+    "basis": "6-31g",
+    "active_space": [6, 8]
+  }
+}

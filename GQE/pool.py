@@ -13,7 +13,8 @@ from dataclasses import dataclass
 import numpy as np
 
 from qcore.circuit import Circuit, Generator, Rotation
-from qcore.excitations import doubles, excitation_generator, pauli_string_pool, singles
+from qcore.excitations import (SCREEN_TOL, doubles, excitation_generator, pauli_string_pool,
+                               screen_excitations, singles)
 
 DEFAULT_TIMES = (0.00625, 0.0125, 0.025, 0.05, 0.1)
 
@@ -38,7 +39,7 @@ class OperatorPool:
 
     @classmethod
     def from_problem(cls, problem, kind: str = "uccsd", times=DEFAULT_TIMES,
-                     screen_tol: float | None = 1e-8) -> "OperatorPool":
+                     screen_tol: float | None = SCREEN_TOL) -> "OperatorPool":
         """Build the pool from excitations of ``problem``.
 
         ``screen_tol``: drop double excitations whose energy gradient at the HF state,
@@ -52,16 +53,7 @@ class OperatorPool:
         if kind not in ("uccsd", "generalized", "qeb", "qubit"):
             raise ValueError(f"unknown pool kind {kind!r}")
         if screen_tol is not None:
-            h = problem.hamiltonian_sparse
-            hf = np.zeros(1 << problem.n_qubits, dtype=np.complex128)
-            hf[problem.hf_index] = 1.0
-            h_hf = h @ hf
-            kept = []
-            for e in excs:
-                g = excitation_generator(m, e).to_pauli_sum(problem.n_qubits).apply(hf)
-                if len(e[0]) == 1 or abs(2 * np.real(np.vdot(h_hf, g))) > screen_tol:
-                    kept.append(e)
-            excs = kept
+            excs = screen_excitations(problem, excs, screen_tol)
         if kind == "qubit":
             gens = pauli_string_pool(m, excs)
         else:

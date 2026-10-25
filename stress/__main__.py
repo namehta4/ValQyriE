@@ -4,6 +4,7 @@
     python -m stress peak                      # measure what the system can achieve at most
     python -m stress run --duration 300        # verified stress run on every physical core
     python -m stress run --mode mixed --duration 3600 --size dram -o burnin.json
+    python -m stress run --config case.json    # options + VQE molecule/basis/active space from a file
     mpirun -np 4 --map-by node python -m stress run --mpi    # one rank per node (cluster)
 """
 from __future__ import annotations
@@ -79,7 +80,10 @@ def workload_params(name, size, si, n_workers, args):
         # keep a step around a second: fewer rotations per step for bigger states
         return {"n_qubits": q, "n_rotations": int(min(16, max(2, 16 * 2 ** (20 - q))))}
     if name == "vqe":
-        return {"molecule": args.molecule or {"cache": "H4", "dram": "NH3"}.get(size, "H2O")}
+        # --molecule on the command line replaces the whole "vqe" section of a case file
+        if args.molecule:
+            return {"molecule": args.molecule}
+        return dict(args.vqe_problem or {"molecule": {"cache": "H4", "dram": "NH3"}.get(size, "H2O")})
     if name == "transformer":
         return {"n_embd": {"cache": 128, "dram": 512}.get(size, 256)}
     raise ValueError(name)
@@ -195,25 +199,37 @@ def cmd_run(args, comm, log):
     if comm.size > 1:
         log(f"nodes           {comm.size} MPI ranks")
 
+    # build the workloads first, so that a bad case file fails before the (slow) peak measurement
+    specs = {}
+    for w in names:
+        p = workload_params(w, args.size, si, len(cpus), args)
+        if w == "vqe":
+            from .workloads import vqe_payload
+            mem = si.memory_bytes
+            try:
+                payload = vqe_payload(p, max_bytes_per_worker=0.8 * mem / len(cpus) if mem else None)
+            except Exception as exc:  # bad molecule, basis, active space, SCF failure, too big
+                sys.exit(f"error: vqe workload {json.dumps(p)}: {exc}")
+            ne, no = payload["active"]
+            log(f"vqe workload    {payload['molecule']} / {payload['basis']}, active space ({ne}e, {no}o), "
+                f"{payload['n_qubits']} qubits, {payload['circuit'].n_params} UCCSD parameters"
+                f"{' (screened)' if payload['screened'] else ''}, "
+                f"{fmt_bytes(payload['bytes_per_worker'])} per worker")
+            if payload["auto_active"]:
+                log(f"                {payload['auto_active']['description']}")
+                for warning in payload["auto_active"]["warnings"]:
+                    log(f"                WARNING: {warning}")
+            p = payload
+        elif w == "statevector":
+            log(f"statevector     {p['n_qubits']} qubits ({fmt_bytes(16 << p['n_qubits'])} state per worker)")
+        specs[w] = p
+
     measured = None
     if not args.no_peak:
         comm.barrier()
         log("\n== ceilings: measuring what this system can achieve ==")
         measured = peaks.measure(si, cpus, seconds=args.peak_seconds, log=log)
         print_peaks(measured, theo, log)
-
-    specs = {}
-    for w in names:
-        p = workload_params(w, args.size, si, len(cpus), args)
-        if w == "vqe":
-            from .workloads import vqe_payload
-            payload = vqe_payload(p["molecule"])
-            log(f"vqe workload    {payload['molecule']}, {payload['n_qubits']} qubits, "
-                f"{payload['circuit'].n_params} UCCSD parameters")
-            p = payload
-        elif w == "statevector":
-            log(f"statevector     {p['n_qubits']} qubits ({fmt_bytes(16 << p['n_qubits'])} state per worker)")
-        specs[w] = p
     tel = Telemetry(cpus)
     if tel.power_note:
         log(f"power           {tel.power_note}")
@@ -293,6 +309,44 @@ def cmd_run(args, comm, log):
     return 0 if verdict != "FAIL" else 1
 
 
+def load_config(path, parser):
+    """Read a JSON case file: top-level keys are ``run`` options (dashes or underscores), plus an
+    optional ``vqe`` section describing the molecule (see ``stress.workloads.build_problem``)."""
+    try:
+        with open(path) as fh:
+            cfg = json.load(fh)
+    except (OSError, json.JSONDecodeError) as exc:
+        sys.exit(f"error: config {path}: {exc}")
+    if not isinstance(cfg, dict):
+        sys.exit(f"error: config {path}: expected a JSON object")
+    actions = {a.dest: a for a in parser._actions if a.dest not in ("help", "config", "molecule")}
+    out = {"vqe_problem": cfg.pop("vqe", None)}
+    if out["vqe_problem"] is not None and not isinstance(out["vqe_problem"], dict):
+        sys.exit(f"error: config {path}: 'vqe' must be an object")
+    for key, val in cfg.items():
+        dest = key.replace("-", "_")
+        if dest == "molecule":
+            sys.exit(f"error: config {path}: put the molecule in the 'vqe' section, e.g. "
+                     '{"vqe": {"molecule": "N2"}}')
+        if dest not in actions:
+            sys.exit(f"error: config {path}: unknown key {key!r}; allowed: vqe, {', '.join(sorted(actions))}")
+        a = actions[dest]
+        if dest == "workloads" and isinstance(val, list):
+            val = ",".join(val)
+        try:
+            if a.nargs == 0:  # store_true flag
+                if not isinstance(val, bool):
+                    raise ValueError("expected true or false")
+            elif a.type and val is not None:
+                val = a.type(val)
+            if a.choices and val not in a.choices:
+                raise ValueError(f"expected one of {list(a.choices)}")
+        except (TypeError, ValueError) as exc:
+            sys.exit(f"error: config {path}: {key}={val!r}: {exc}")
+        out[dest] = val
+    return out
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(prog="python -m stress", description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -316,18 +370,19 @@ def main(argv=None):
                    help="working-set size: fits in L2 / in L3 / spills to DRAM")
     r.add_argument("--qubits", type=int, help="statevector qubits (overrides --size)")
     r.add_argument("--dgemm-n", type=int)
-    r.add_argument("--molecule", help="VQE molecule (default by --size)")
+    r.add_argument("--config", help="JSON case file with run options and a 'vqe' molecule section; "
+                                     "options given on the command line override the file")
+    r.add_argument("--molecule", help="VQE library molecule at default settings (default by --size; "
+                                       "replaces the case file's 'vqe' section)")
     r.add_argument("--interval", type=float, default=10.0, help="status/telemetry interval (s)")
     r.add_argument("--no-peak", action="store_true", help="skip the ceiling measurement")
     r.add_argument("--peak-seconds", type=float, default=4.0)
     r.add_argument("-o", "--output", help="write a JSON report")
+    r.set_defaults(vqe_problem=None)
     args = ap.parse_args(argv)
-    if getattr(args, "molecule", None):
-        from qcore.molecules import get_molecule
-        try:
-            get_molecule(args.molecule)  # fail before the (slow) peak measurement
-        except ValueError as exc:
-            sys.exit(f"error: {exc}")
+    if args.cmd == "run" and args.config:
+        r.set_defaults(**load_config(args.config, r))
+        args = ap.parse_args(argv)  # command-line options take precedence over the file
 
     comm = Comm(args.mpi)
     log = log_fn(comm)

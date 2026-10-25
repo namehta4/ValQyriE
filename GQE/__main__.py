@@ -17,7 +17,7 @@ def main(argv=None):
     ap.add_argument("--bond-length", type=float, default=None)
     ap.add_argument("--basis", default="sto-3g")
     ap.add_argument("--mapping", default="jw", choices=["jw", "bk", "parity"])
-    ap.add_argument("--active", default="default", help='"default", "full", or "NELEC,NORB"')
+    active_space.add_cli_arguments(ap)
     ap.add_argument("--pool", default=d.pool, choices=["uccsd", "generalized", "qeb", "qubit"])
     ap.add_argument("--no-screen", action="store_true", help="keep symmetry-forbidden doubles in the pool")
     ap.add_argument("--seq-len", type=int, default=None)
@@ -35,7 +35,7 @@ def main(argv=None):
     ap.add_argument("-v", "--verbose", action="store_true")
     a = ap.parse_args(argv)
 
-    active = a.active if a.active in ("default", "full") else tuple(int(v) for v in a.active.split(","))
+    active = active_space.from_cli(a)
     prob = MolecularProblem.from_library(a.molecule, bond_length=a.bond_length, basis=a.basis,
                                          mapping=a.mapping, active_space=active)
     print(prob.summary())

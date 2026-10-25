@@ -3,6 +3,58 @@
 CPU-only, exact-statevector implementations of the **Variational Quantum Eigensolver (VQE)** and the
 **Generative Quantum Eigensolver (GQE / GPT-QE)** for molecular ground-state energies.
 
+## From molecule to ground-state energy
+
+Both methods find the lowest electronic energy of a molecule. They share every step except the last:
+
+```
+ 1  molecule            atoms, coordinates, charge, spin
+ 2  basis set           atomic orbital functions (STO-3G, 6-31G, ...)
+ 3  Hartree-Fock        molecular orbitals, reference state, E_HF
+ 4  active space        which orbitals go onto qubits
+ 5  qubit Hamiltonian   fermion-to-qubit mapping: H = Σ c_P P
+ 6  solve               VQE: ansatz U(θ) + classical optimizer
+                        GQE: transformer generates circuits
+ 7  check               compare with exact E_FCI
+```
+
+1. **Molecule.** Atoms, their fixed positions (the Born-Oppenheimer approximation: nuclei don't move),
+   total charge and spin. The library holds experimental equilibrium geometries; you can also give a
+   bond length or your own coordinates.
+2. **Basis set.** Electrons are described with a finite set of atomic orbital functions (STO-3G,
+   6-31G, cc-pVDZ, ...). A larger basis is more accurate but gives more orbitals, and every orbital
+   costs 2 qubits.
+3. **Hartree-Fock (HF).** A mean-field calculation (PySCF RHF, or ROHF for open shells) gives
+   molecular orbitals and the best single-determinant energy, E_HF. HF misses the *correlation
+   energy*: the part of the energy that comes from electrons avoiding each other. Recovering that part
+   is the job of the quantum algorithm. The HF determinant is also its starting state.
+4. **Active space.** Only some orbitals are treated on qubits. Low-lying core orbitals stay filled and
+   high-lying ones stay empty. Their effect is folded into the integrals (CASCI), so the problem
+   shrinks to 2 × (active orbitals) qubits.
+5. **Qubit Hamiltonian.** The electronic Hamiltonian, written with fermionic creation and
+   annihilation operators, is mapped onto qubits (Jordan-Wigner, Bravyi-Kitaev or parity), one qubit
+   per spin orbital. The result is a weighted sum of Pauli strings, H = Σ c_P P.
+6. **Solve.** Find a quantum state |ψ⟩ with the lowest possible energy E = ⟨ψ|H|ψ⟩. The variational
+   principle guarantees that E is never below the true ground-state energy, so lower is better.
+   * **VQE** fixes a circuit shape, the *ansatz* U(θ) (e.g. UCCSD), applies it to the HF state and lets
+     a classical optimizer (here BFGS with exact gradients) adjust the angles θ to minimise E.
+     *ADAPT-VQE* builds the ansatz one operator at a time, always adding the one that lowers the energy
+     fastest.
+   * **GQE** has no circuit angles to optimise. A small transformer model (like a GPT language model)
+     writes circuits as sequences of "words" from a fixed vocabulary of operators with preset angles.
+     Each circuit's energy is evaluated, and the model is trained to make low-energy circuits more
+     likely. The best circuit can then be fine-tuned with the VQE optimizer.
+7. **Check.** In the active space the problem is small enough to solve exactly (full configuration
+   interaction, FCI). Every result is reported as its error against E_FCI. The usual target is
+   *chemical accuracy*, 1.6 mHa (1 kcal/mol).
+
+On a quantum computer, step 6 would estimate E from repeated measurements, which adds statistical
+noise and hardware errors. Here the quantum state is simulated exactly on the CPU, so energies and
+gradients have no noise. The answer is exact for the chosen basis and active space. How close it is
+to experiment depends on those two choices.
+
+## Features
+
 * Any popular ansatz: UCCSD, UCCD, UCCGSD, k-UpCCGSD, pUCCD, qubit-excitation UCCSD, hardware-efficient,
   ADAPT-VQE (fermionic / QEB / qubit pools), or your own generators.
 * Any of Jordan-Wigner, Bravyi-Kitaev or parity encodings.
@@ -28,7 +80,7 @@ ValQyriE/
 ├── VQE/              VQE, ansatze, ADAPT-VQE, CLI (python -m VQE)
 ├── GQE/              GPT model, operator pool, GQE training loop, CLI (python -m GQE)
 ├── stress/           verified CPU stress test + system ceilings (python -m stress)
-├── examples/         benchmark.py, dissociation_curve.py
+├── examples/         benchmark.py, dissociation_curve.py, stress/*.json case files
 └── tests/            validation suite (pytest)
 ```
 
@@ -54,6 +106,8 @@ python -m VQE --molecule H2O --ansatz adapt --pool qeb -v   # ADAPT-VQE with qub
 python -m VQE --molecule N2 --ansatz kupccgsd --layers 2 --mapping bk
 python -m VQE --molecule H2 --ansatz hea --layers 3 --number-penalty 0.5 --spin-penalty 0.5
 python -m VQE --molecule LiH --bond-length 2.5 --basis 6-31g --active 2,5
+python -m VQE --molecule N2 --basis 6-31g --active 6,8 --screen  # drop symmetry-forbidden doubles
+python -m VQE --molecule H2O --basis 6-31g --active auto        # opt-in: MP2 picks the active space
 python -m GQE --molecule LiH -v                             # GPT-QE, then VQE-refine the best circuit
 python examples/benchmark.py --ansatz uccsd kupccgsd adapt --gqe
 ```
@@ -125,6 +179,103 @@ No circuit parameters are optimised during generation. `refine=True` (the defaul
 continuous angles of the best circuit with BFGS, and the result reports both numbers separately.
 Doubles whose HF gradient is zero by symmetry are screened out of the pool (`screen_tol=None`
 disables this).
+
+### Screening: should I turn it on?
+
+Many double excitations in UCCSD can never lower the energy, because the molecule's symmetry forbids
+them. Their best value is exactly zero, so they only add parameters and run time. **Screening** finds
+and removes them before the run: a double is dropped when its energy gradient at the Hartree-Fock
+state is zero (below 10⁻⁸). Singles are always kept.
+
+**Simple rule:**
+
+| you are running | screening | how |
+|---|---|---|
+| VQE with `uccsd`, `uccd` or `quccsd` to get an energy | **turn it on** | `python -m VQE ... --screen`, or `UCCSD(screen_tol=1e-8)` |
+| GQE | leave it on (already the default) | `--no-screen` turns it off |
+| ADAPT-VQE | not needed: ADAPT already picks only useful operators | — |
+| `uccgsd`, `kupccgsd`, `puccd`, `hea` | not available (the test doesn't work for generalized excitations) | — |
+| the stress test, comparing machines | **leave it off** (default): the full problem is more work per step, and results stay comparable | — |
+| the stress test, mirroring a screened science run | turn it on | `"screen": true` in the `vqe` section |
+
+The energy is the same with and without screening. Measured (UCCSD, BFGS) on nine library molecules
+(LiH, BeH2, H2O, HF, N2, CO, NH3, CH4, O2), the energies agree to better than 2·10⁻⁹ Ha, while the
+parameter count drops by 12–67%:
+
+| problem | qubits | parameters (full → screened) | VQE time |
+|---|---|---|---|
+| H2O / STO-3G | 12 | 92 → 40 | 0.1 s → 0.1 s |
+| N2 / STO-3G | 12 | 117 → 65 | 0.3 s → 0.2 s |
+| NH3 / STO-3G | 14 | 204 → 152 | 3.5 s → 2.5 s |
+| N2 / 6-31G, (6e, 8o) | 16 | 315 → 97 | 14.0 s → 8.6 s |
+
+The savings grow with the basis set, so screening matters most for bigger problems. Small molecules
+barely change, and an optimizer can even take a slightly different path and finish later (CH4: 2.5 s
+→ 5.0 s).
+
+**One caution.** Screening assumes the ground state has the same symmetry as the Hartree-Fock state.
+That is true for the library molecules at their default geometries. It can fail for unusual cases,
+such as strongly stretched bonds or some open-shell molecules. If you are unsure, run a small version
+once with and once without `--screen`. Both runs should give the same energy.
+
+### Basis sets
+
+`--basis` (or `"basis"` in a stress case file) accepts any basis set built into PySCF, about 360 names
+such as `sto-3g`, `sto-6g`, `3-21g`, `6-31g`, `6-31g*`, `6-311g`, `def2-svp`, `cc-pvdz` and
+`aug-cc-pvdz`. An unknown name is rejected with an error. Installing `basis-set-exchange` (`pip
+install basis-set-exchange`) makes PySCF look up names it doesn't have built in.
+
+The basis decides how many orbitals the molecule has, and each orbital in the active space costs 2
+qubits. A larger basis is more accurate but quickly exceeds what a CPU can simulate, so beyond STO-3G
+you will almost always also need an active space:
+
+| basis | H2 | LiH | H2O | N2 | CH4 |
+|---|---|---|---|---|---|
+| `sto-3g` (default) | 2 | 6 | 7 | 10 | 9 |
+| `6-31g` | 4 | 11 | 13 | 18 | 17 |
+| `6-31g*` | 4 | 16 | 18 | 28 | 22 |
+| `cc-pvdz` | 10 | 19 | 24 | 28 | 34 |
+| `aug-cc-pvdz` | 18 | 32 | 41 | 46 | 59 |
+
+(numbers are orbitals; qubits = 2 × the orbitals kept in the active space)
+
+### Active space
+
+The active space is the set of orbitals that go onto qubits. All other orbitals are kept either
+always filled (core) or always empty. Choices (`--active` on the command line, `"active_space"` in a
+stress case file):
+
+* `default` (**the default**): the hand-picked active space listed for each library molecule (≤ 14
+  qubits in STO-3G).
+* `full`: all electrons and orbitals.
+* `NELEC,NORB` (`[NELEC, NORB]` in JSON): the NORB orbitals nearest the highest occupied one, by
+  Hartree-Fock orbital energy.
+* `auto` (**opt-in, never used unless asked for**): let MP2 pick the orbitals.
+
+**How `auto` works.** A quick MP2 calculation estimates how filled each orbital really is.
+Hartree-Fock says every orbital holds exactly 2 or 0 electrons; with electron correlation, some hold
+for example 1.97 or 0.03. Orbitals that stay within `threshold` (default 0.01) of 2 or 0 barely take
+part, so they are left out. The rest are kept, up to `max_qubits` (default 16). If too many qualify,
+the most fractional ones win. Open-shell (singly occupied) orbitals are always kept. Orbitals of
+equal energy, such as a pair of π orbitals, are kept or dropped together.
+
+```bash
+python -m VQE --molecule H2O --basis 6-31g --active auto --auto-max-qubits 12 --screen
+```
+```json
+"vqe": {"molecule": "H2O", "basis": "6-31g", "active_space": {"method": "auto", "max_qubits": 12}}
+```
+
+The chosen orbitals and their MP2 occupations are printed. At the same qubit count it can do better
+than picking orbitals by energy: H2O / 6-31G with 12 qubits gives E_FCI = −76.0056 Ha with `auto`
+against −75.9951 Ha with the library's (8e, 6o). With few orbitals worth correlating it simply
+picks a smaller space: LiH / STO-3G becomes 4 qubits instead of 12, which is cheaper but also less
+accurate.
+
+**When not to trust it.** MP2 is an approximation that breaks down exactly where electrons are
+strongly correlated, such as stretched bonds (e.g. N2 at 2.0 Å). The tool then prints a WARNING. The
+selected orbitals are usually still reasonable, but check against a hand-picked active space. A
+WARNING is also printed when more orbitals qualify than `max_qubits` allows.
 
 ## Benchmarks (STO-3G, Jordan-Wigner, Apple M-series CPU)
 
@@ -205,17 +356,94 @@ chooses working sets that fit in L2, fit in L3, or spill to DRAM. `--mode phases
 at a time to give clean per-workload numbers; `--mode mixed` has every core cycle through all of them
 for maximum variation in thermal and power load.
 
-The `vqe` workload accepts any molecule in the library through `--molecule` (case-insensitive):
-H2, HeH+, LiH, BeH2, H2O, NH3, CH4, HF, N2, CO, O2, H4, H6 or H4-ring, at their default geometry,
-basis and active space. When it is not given, the default depends on `--size`: H4 for `cache`, H2O
-for `auto`/`llc`, and NH3 for `dram`. Bigger molecules mean more qubits and more work per step:
+### Case files (`--config`)
+
+A run can be described in a JSON case file instead of on the command line. This is the only place
+to set the VQE molecule's bond length, basis set and active space. The file's top-level keys are the
+`run` options (`duration`, `mode`, `workloads`, `size`, `workers`, `qubits`, `dgemm_n`, `interval`,
+`no_peak`, `peak_seconds`, `output`, `freq_ghz`, `flops_per_cycle`, `mem_bw_gbs`, `mpi`; dashes or
+underscores). An optional `vqe` section describes the molecule. Options given on the command line
+override the file, so one case file can serve many runs:
 
 ```bash
-python -m stress run --workloads vqe --molecule CH4 --duration 600
+python -m stress run --config examples/stress/n2_stretched_631g.json
+python -m stress run --config examples/stress/burnin.json --duration 600   # shorter than the file says
 ```
 
-NH3 and CH4 (14 qubits) are the heaviest. H2 and HeH+ (4 qubits) finish a step in microseconds, so
-they measure Python overhead more than the CPU and are not useful as a stress load.
+```json
+{
+  "mode": "mixed", "duration": 3600, "size": "dram", "output": "burnin-report.json",
+  "vqe": {"molecule": "H2O", "bond_length": 1.1, "basis": "6-31g", "active_space": [8, 8]}
+}
+```
+
+The `vqe` section takes one of two forms:
+
+* **Library molecule**: `molecule` (H2, HeH+, LiH, BeH2, H2O, NH3, CH4, HF, N2, CO, O2, H4, H6,
+  H4-ring; case-insensitive), with optional `bond_length` (Å), `basis` (any PySCF basis name),
+  `active_space` (`"default"`, `"full"`, `[n_electrons, n_orbitals]`, or the opt-in `"auto"` /
+  `{"method": "auto", "threshold": 0.01, "max_qubits": 16}`; see [Active space](#active-space)) and
+  `mapping` (`jw`, `bk` or `parity`).
+* **Any other molecule**: `geometry` (a PySCF atom string in Å), with optional `charge`, `spin`
+  (N_α − N_β), `basis`, `active_space` (`"full"`, `[n_e, n_o]` or `"auto"`), `mapping` and `name`. See
+  [`examples/stress/custom_geometry.json`](examples/stress/custom_geometry.json) (ethylene).
+
+Either form also takes `"screen": true`, which removes symmetry-forbidden doubles from the UCCSD
+circuit. Leave it off (the default) when comparing machines; see
+[Screening](#screening-should-i-turn-it-on).
+
+The JSON report records the full case file, so a run can be reproduced from it. Unknown keys, invalid
+values, an unknown molecule or basis, and an impossible active space are all rejected with a message
+before any load starts. A problem too big for RAM is rejected the same way: each worker holds its own
+copy of the sparse Hamiltonian plus about 128 B per amplitude. The tool prints the per-worker memory
+and refuses a problem that needs more than 80% of RAM across all workers.
+
+`--molecule NAME` on the command line is a shortcut for a library molecule at default settings, and
+replaces the file's `vqe` section. Bigger problems mean more work per step. Measured on one Apple M4
+core:
+
+| problem | qubits | UCCSD parameters | time per step | memory per worker |
+|---|---|---|---|---|
+| H2O / STO-3G, default (8e, 6o) | 12 | 92 | 5 ms | ~2 MiB |
+| NH3 or CH4 / STO-3G, default | 14 | 204 | 40 ms | 40–50 MiB |
+| N2 / 6-31G, (6e, 8o) | 16 | 315 | 0.6 s | 87 MiB |
+| H2O / 6-31G, (8e, 8o) | 16 | 360 | 2 s | 95 MiB |
+| LiH / 6-31G, (2e, 9o) | 18 | 80 | 4 s | ~1 GiB |
+
+H2 and HeH+ (4 qubits) finish a step in microseconds, so they measure Python overhead more than the
+CPU and are not useful as a stress load.
+
+### Defaults
+
+| setting | default |
+|---|---|
+| `duration` | 60 s per phase (`phases` runs the four workloads one after another, so about 4 min) |
+| `mode` | `phases` |
+| `workloads` | `dgemm,statevector,vqe,transformer` (`transformer` is skipped if PyTorch is missing) |
+| `workers` | `physical`: one worker per physical core, pinned on Linux |
+| `size` | `auto` |
+| ceiling measurement | on, `peak_seconds` 4 per measurement (`no_peak` to skip) |
+| `interval` | 10 s between status lines and telemetry samples |
+| theoretical peak | max boost clock from the OS and FLOPs/cycle from the ISA; memory bandwidth not set |
+| `output` | none (no JSON report) |
+
+Working-set sizes picked by `size`:
+
+| workload | `cache` | `auto` | `llc` | `dram` |
+|---|---|---|---|---|
+| `dgemm` matrix n | 256 | 1024 | 1024 | 2048 |
+| `statevector` qubits¹ | fits in L2 | ≤ 24 | fits in L3 | ≤ 26 |
+| `vqe` molecule | H4 | H2O | H2O | NH3 |
+| `transformer` width | 128 | 256 | 256 | 512 |
+
+¹ Never below 10, and never above what fits in half the RAM across all workers. Bigger states use
+fewer rotations per step (16 at 20 qubits and below, halving for each extra qubit, minimum 2), which
+keeps each step to about a second.
+
+Defaults for the `vqe` section are the library's experimental bond length, `sto-3g`, the library's
+active space (all orbitals for a custom `geometry`), `jw`, charge 0, spin 0 and no screening. The
+circuit is always UCCSD at fixed random parameters (0.05 · N(0, 1), seed 7). The transformer is the GQE GPT with 4
+layers, 8 heads, sequence length 64, batch 8 and vocabulary 512.
 
 ### "What the system can achieve at most"
 

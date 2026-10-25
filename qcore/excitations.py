@@ -10,6 +10,8 @@ from __future__ import annotations
 
 from itertools import combinations
 
+import numpy as np
+
 from .circuit import Generator
 from .mappings import FermionQubitMapping, JordanWigner
 from .pauli import PauliSum
@@ -89,6 +91,33 @@ def excitation_generator(mapping: FermionQubitMapping, exc: Excitation, kind: st
             raise ValueError("qubit excitations require the Jordan-Wigner mapping")
         return qubit_generator(mapping.n_qubits, exc)
     raise ValueError(f"unknown excitation kind {kind!r}")
+
+
+SCREEN_TOL = 1e-8
+
+
+def screen_excitations(problem, excitations, tol: float = SCREEN_TOL) -> list[Excitation]:
+    """Drop double excitations that cannot lower the energy because of the molecule's symmetry.
+
+    A double is kept if its energy gradient at the Hartree-Fock state, |<HF|[H, G]|HF>|, exceeds
+    ``tol``. Doubles that change the spatial symmetry have an exactly zero gradient (and an
+    optimal amplitude of zero). Singles are always kept: Brillouin's theorem makes every single's
+    HF gradient vanish, so the test cannot tell them apart. Meant for occupied -> virtual
+    excitations; generalized ones can have a zero HF gradient and still matter.
+    """
+    h = problem.hamiltonian_sparse
+    hf = np.zeros(1 << problem.n_qubits, dtype=np.complex128)
+    hf[problem.hf_index] = 1.0
+    h_hf = h @ hf
+    kept = []
+    for e in excitations:
+        if len(e[0]) == 1:
+            kept.append(e)
+            continue
+        g = fermionic_generator(problem.mapping, e).to_pauli_sum(problem.n_qubits).apply(hf)
+        if abs(2 * np.real(np.vdot(h_hf, g))) > tol:
+            kept.append(e)
+    return kept
 
 
 def pauli_string_pool(mapping: FermionQubitMapping, excitations) -> list[Generator]:

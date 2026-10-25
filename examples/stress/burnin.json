@@ -1,0 +1,14 @@
+{
+  "mode": "mixed",
+  "duration": 3600,
+  "size": "dram",
+  "workloads": ["dgemm", "statevector", "vqe", "transformer"],
+  "workers": "physical",
+  "interval": 30,
+  "output": "burnin-report.json",
+  "vqe": {
+    "molecule": "H2O",
+    "basis": "6-31g",
+    "active_space": [8, 8]
+  }
+}

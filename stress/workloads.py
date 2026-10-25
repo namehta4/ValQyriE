@@ -119,17 +119,83 @@ class VQEEval:
         return 1.0, _xor_fingerprint(np.array([e]), g), err
 
 
-def vqe_payload(molecule: str = "H2O", seed: int = 7) -> dict:
-    """Built once in the parent (runs PySCF), then shipped to workers."""
+PROBLEM_KEYS = {"molecule", "geometry", "bond_length", "basis", "active_space", "mapping",
+                "charge", "spin", "name"}
+VQE_KEYS = PROBLEM_KEYS | {"screen"}
+
+
+def build_problem(spec):
+    """MolecularProblem from a molecule name or a dict (the ``vqe`` section of a case file):
+
+    * library molecule: ``molecule`` plus optional ``bond_length`` (Angstrom), ``basis``,
+      ``active_space`` ("default", "full", [n_electrons, n_orbitals], or opt-in "auto" /
+      {"method": "auto", "threshold": ..., "max_qubits": ...}) and ``mapping``;
+    * any other molecule: ``geometry`` (PySCF atom string, Angstrom) plus optional ``charge``,
+      ``spin`` (N_alpha - N_beta), ``basis``, ``active_space`` ("full", [n_e, n_o] or "auto"),
+      ``mapping`` and ``name``.
+    """
     from qcore import MolecularProblem
+    from qcore.active_space import AutoActiveSpace, parse_active_space
+    spec = {"molecule": spec} if isinstance(spec, str) else dict(spec)
+    unknown = set(spec) - PROBLEM_KEYS
+    if unknown:
+        raise ValueError(f"unknown vqe key(s) {sorted(unknown)}; allowed: {sorted(PROBLEM_KEYS)}")
+    if ("molecule" in spec) == ("geometry" in spec):
+        raise ValueError("vqe section needs exactly one of 'molecule' (library name) or 'geometry'")
+    active = parse_active_space(spec.get("active_space", "default"))
+    basis, mapping = spec.get("basis", "sto-3g"), spec.get("mapping", "jw")
+    if "molecule" in spec:
+        extra = {"charge", "spin", "name"} & set(spec)
+        if extra:
+            raise ValueError(f"{sorted(extra)} apply only to a custom 'geometry'")
+        return MolecularProblem.from_library(spec["molecule"], bond_length=spec.get("bond_length"), basis=basis,
+                                             mapping=mapping, active_space=active)
+    if "bond_length" in spec:
+        raise ValueError("'bond_length' applies only to library molecules; put the coordinates in 'geometry'")
+    auto = active if isinstance(active, AutoActiveSpace) else None
+    ae, ao = (None, None) if auto or active in ("default", "full") else active
+    return MolecularProblem(spec["geometry"], basis=basis, charge=spec.get("charge", 0), spin=spec.get("spin", 0),
+                            active_electrons=ae, active_orbitals=ao, mapping=mapping, auto_active=auto,
+                            name=spec.get("name", "custom"))
+
+
+def vqe_payload(molecule="H2O", seed: int = 7, max_bytes_per_worker: float | None = None) -> dict:
+    """Built once in the parent (runs PySCF), then shipped to workers. ``molecule`` is a library
+    name or a ``vqe`` section dict: the problem (see ``build_problem``) plus ``screen`` (true:
+    drop symmetry-forbidden doubles from UCCSD)."""
+    from qcore.excitations import SCREEN_TOL
     from VQE.ansatz import UCCSD
-    p = MolecularProblem.from_library(molecule)
-    circ = UCCSD().build(p)
+    from .peaks import BYTES_PER_AMP_VQE, BYTES_PER_NNZ, NNZ_PER_ROW_REF
+    spec = {"molecule": molecule} if isinstance(molecule, str) else dict(molecule)
+    screen = spec.pop("screen", False)
+    if not isinstance(screen, bool):
+        raise ValueError(f"'screen' must be true or false, got {screen!r}")
+    unknown = set(spec) - PROBLEM_KEYS
+    if unknown:
+        raise ValueError(f"unknown vqe key(s) {sorted(unknown)}; allowed: {sorted(VQE_KEYS)}")
+    p = build_problem(spec)
+    # refuse before building the (large) sparse Hamiltonian, using the reference density
+    est = (BYTES_PER_AMP_VQE + BYTES_PER_NNZ * NNZ_PER_ROW_REF) * 2.0 ** p.n_qubits
+    if max_bytes_per_worker and est > 2 * max_bytes_per_worker:
+        raise ValueError(f"{p.name} needs {p.n_qubits} qubits (~{est / 2**30:.1f} GiB per worker), more than "
+                         f"the {max_bytes_per_worker / 2**30:.1f} GiB available per worker; use a smaller "
+                         f"active space or fewer --workers")
+    circ = UCCSD(screen_tol=SCREEN_TOL if screen else None).build(p)
     theta = 0.05 * np.random.default_rng(seed).standard_normal(circ.n_params)
     h = p.hamiltonian_sparse
+    bytes_per_worker = h.data.nbytes + h.indices.nbytes + h.indptr.nbytes + BYTES_PER_AMP_VQE * 2.0 ** p.n_qubits
+    if max_bytes_per_worker and bytes_per_worker > max_bytes_per_worker:
+        raise ValueError(f"{p.name} needs ~{bytes_per_worker / 2**30:.2f} GiB per worker, more than the "
+                         f"{max_bytes_per_worker / 2**30:.2f} GiB available per worker; use a smaller "
+                         f"active space or fewer --workers")
     e, g = circ.energy_and_gradient(theta, h)
     return {"hamiltonian": h, "circuit": circ, "theta": theta, "energy": e, "gradient": g,
-            "e_fci": p.e_fci, "molecule": p.name, "n_qubits": p.n_qubits}
+            "e_fci": p.e_fci, "molecule": p.name, "n_qubits": p.n_qubits, "basis": p.basis,
+            "active": (p.n_electrons, p.n_orbitals), "bytes_per_worker": bytes_per_worker,
+            "screened": screen,
+            "auto_active": None if p.active_choice is None else
+            {"description": p.active_choice.describe(), "orbitals": p.active_choice.orbitals,
+             "warnings": p.active_choice.warnings}}
 
 
 class Transformer:

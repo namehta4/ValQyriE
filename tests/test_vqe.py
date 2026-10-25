@@ -70,3 +70,13 @@ def test_open_shell_vqe():
 def test_unknown_ansatz():
     with pytest.raises(ValueError):
         get_ansatz("nope")
+
+
+def test_screened_uccsd_same_energy():
+    p = MolecularProblem.from_library("H2O")
+    full, screened = get_ansatz("uccsd"), get_ansatz("uccsd", screen_tol=1e-8)
+    assert screened.build(p).n_params < full.build(p).n_params
+    e_full, e_scr = VQE(p, full).run().energy, VQE(p, screened).run().energy
+    assert abs(e_full - e_scr) < 1e-8
+    with pytest.raises(ValueError):
+        get_ansatz("uccgsd", screen_tol=1e-8).build(p)

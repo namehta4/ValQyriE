@@ -72,3 +72,45 @@ def test_cli_short_run(tmp_path):
     rc = main(["run", "--duration", "1", "--no-peak", "--workers", "2", "--workloads", "dgemm,statevector",
                "--qubits", "10", "--dgemm-n", "128", "--interval", "1", "-o", str(out)])
     assert rc == 0 and out.exists()
+
+
+def test_build_problem_spec():
+    from stress.workloads import build_problem
+    p = build_problem({"molecule": "LiH", "bond_length": 2.0, "basis": "sto-3g", "active_space": [2, 3]})
+    assert p.n_qubits == 6 and "r=2.0000" in p.name
+    q = build_problem({"geometry": "H 0 0 0; H 0 0 0.74", "name": "H2x"})
+    assert q.n_qubits == 4 and q.name == "H2x"
+    for bad in ({"molecule": "H2", "charge": 1}, {"geometry": "H 0 0 0; H 0 0 1", "bond_length": 1},
+                {"molecule": "H2", "geometry": "H 0 0 0"}, {"molecule": "H2", "colour": 1},
+                {"molecule": "H2", "active_space": 3}):
+        with pytest.raises(ValueError):
+            build_problem(bad)
+
+
+def test_cli_case_file(tmp_path):
+    import json
+    cfg = tmp_path / "case.json"
+    cfg.write_text(json.dumps({"workloads": ["vqe"], "duration": 100, "no_peak": True, "workers": "2",
+                               "vqe": {"molecule": "LiH", "bond_length": 2.0, "active_space": [2, 3]}}))
+    out = tmp_path / "r.json"
+    assert main(["run", "--config", str(cfg), "--duration", "1", "--interval", "1", "-o", str(out)]) == 0
+    rep = json.loads(out.read_text())
+    assert rep["args"]["duration"] == 1 and rep["args"]["vqe_problem"]["bond_length"] == 2.0
+    cfg.write_text(json.dumps({"mode": "burst"}))
+    with pytest.raises(SystemExit):
+        main(["run", "--config", str(cfg)])
+
+
+def test_vqe_workload_screened():
+    full = vqe_payload({"molecule": "LiH"})
+    scr = vqe_payload({"molecule": "LiH", "screen": True})
+    assert scr["screened"] and scr["circuit"].n_params < full["circuit"].n_params
+    assert VQEEval(scr).step()[2] is None
+    with pytest.raises(ValueError):
+        vqe_payload({"molecule": "LiH", "screen": "yes"})
+
+
+def test_vqe_workload_auto_active_space():
+    pay = vqe_payload({"molecule": "H2O", "active_space": {"method": "auto", "max_qubits": 8}})
+    assert pay["n_qubits"] <= 8 and pay["auto_active"]["orbitals"]
+    assert VQEEval(pay).step()[2] is None

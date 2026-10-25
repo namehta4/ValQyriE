@@ -107,3 +107,38 @@ def test_block_rotation_is_exact(mapping):
         c.add_generator(g, c.new_parameter())
         ref = expm(0.731 * g.to_pauli_sum(p.n_qubits).to_dense()) @ psi0
         assert np.allclose(c.state([0.731]), ref, atol=1e-12)
+
+
+def test_auto_active_space_is_opt_in_and_exact():
+    from qcore import AutoActiveSpace
+    assert MolecularProblem.from_library("H2O").active_choice is None  # never the default
+    p = MolecularProblem.from_library("H2O", basis="6-31g", active_space=AutoActiveSpace(max_qubits=12))
+    assert p.n_qubits <= 12 and p.active_choice is not None
+    hf = np.zeros(1 << p.n_qubits, dtype=complex)
+    hf[p.hf_index] = 1.0
+    assert abs(p.energy(hf) - p.e_hf) < 1e-9          # HF determinant is still the reference
+    assert abs(p.exact_ground_state()[0] - p.e_fci) < 1e-8
+    lib = MolecularProblem.from_library("H2O", basis="6-31g")  # library (8e, 6o), also 12 qubits
+    assert p.e_fci < lib.e_fci
+
+
+def test_auto_active_space_degeneracy_and_warnings():
+    ch4 = MolecularProblem.from_library("CH4", basis="6-31g", active_space="auto")
+    occ, orbs = ch4.active_choice.occupations, set(ch4.active_choice.orbitals)
+    e = ch4.mf.mo_energy
+    for i in range(len(e)):  # degenerate partners are selected together
+        for j in range(len(e)):
+            if abs(e[i] - e[j]) < 1e-4 and round(ch4.mf.mo_occ[i]) == round(ch4.mf.mo_occ[j]):
+                assert (i in orbs) == (j in orbs)
+    stretched = MolecularProblem.from_library("N2", bond_length=2.0, active_space="auto")
+    assert any("strongly fractional" in w for w in stretched.active_choice.warnings)
+    o2 = MolecularProblem.from_library("O2", active_space="auto")  # open shell: SOMOs always active
+    assert all(i in o2.active_choice.orbitals for i in np.flatnonzero(np.rint(o2.mf.mo_occ) == 1))
+
+
+@pytest.mark.parametrize("bad", ["automatic", {"method": "auto", "max_qbits": 8}, {"threshold": 0.1},
+                                 {"method": "auto", "max_qubits": 2}, [4]])
+def test_auto_active_space_rejects_bad_input(bad):
+    from qcore.active_space import parse_active_space
+    with pytest.raises(ValueError):
+        parse_active_space(bad)

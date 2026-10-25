@@ -13,6 +13,7 @@ from functools import cached_property
 import numpy as np
 import scipy.sparse.linalg as spla
 
+from .active_space import AutoActiveSpace, parse_active_space, select_active_space
 from .hamiltonian import molecular_qubit_hamiltonian, s2_operator
 from .mappings import FermionQubitMapping, get_mapping
 from .molecules import get_molecule
@@ -30,13 +31,15 @@ class MolecularProblem:
     geometry : PySCF atom spec (string or list of (symbol, (x, y, z))) in ``unit``.
     basis, charge, spin : as in PySCF (``spin`` = N_alpha - N_beta).
     active_electrons, active_orbitals : active space; ``None`` = all electrons/orbitals.
+    auto_active : ``AutoActiveSpace`` to choose the active orbitals from MP2 occupations
+        instead (``qcore.active_space``); overrides ``active_electrons``/``active_orbitals``.
     mapping : "jw", "bk" or "parity".
     """
 
     def __init__(self, geometry, basis: str = "sto-3g", charge: int = 0, spin: int = 0,
                  active_electrons: int | None = None, active_orbitals: int | None = None,
                  mapping: str = "jw", name: str | None = None, unit: str = "Angstrom",
-                 verbose: bool = False):
+                 auto_active: AutoActiveSpace | None = None, verbose: bool = False):
         from pyscf import ao2mo, gto, mcscf, scf
 
         self.name = name or "molecule"
@@ -57,6 +60,11 @@ class MolecularProblem:
 
         n_elec = self.mol.nelectron
         n_mo = mf.mo_coeff.shape[1]
+        self.active_choice = None
+        if auto_active is not None:
+            self.active_choice = select_active_space(mf, auto_active)
+            active_electrons = self.active_choice.n_electrons
+            active_orbitals = len(self.active_choice.orbitals)
         ncas = n_mo if active_orbitals is None else int(active_orbitals)
         nelecas = n_elec if active_electrons is None else int(active_electrons)
         if (nelecas - spin) % 2:
@@ -72,6 +80,8 @@ class MolecularProblem:
 
         cas = mcscf.CASCI(mf, ncas, (self.n_alpha, self.n_beta))
         cas.verbose = 0
+        if self.active_choice is not None:  # possibly non-contiguous canonical orbitals
+            cas.mo_coeff = cas.sort_mo(self.active_choice.orbitals, base=0)
         h1, e_core = cas.get_h1eff()
         self.h1 = np.asarray(h1)
         self.e_core = float(e_core)
@@ -85,13 +95,17 @@ class MolecularProblem:
     @classmethod
     def from_library(cls, name: str, bond_length: float | None = None, basis: str = "sto-3g",
                      mapping: str = "jw", active_space="default", **kw) -> "MolecularProblem":
-        """Build a benchmark molecule. ``active_space``: "default", "full" or (n_elec, n_orb)."""
+        """Build a benchmark molecule. ``active_space``: "default" (the library's choice),
+        "full", (n_elec, n_orb), or "auto" / ``AutoActiveSpace(...)`` (MP2 occupations)."""
         spec = get_molecule(name)
         r = spec.r_eq if bond_length is None else bond_length
+        active_space = parse_active_space(active_space)
         if active_space == "default":
             active_space = spec.active
         elif active_space == "full":
             active_space = None
+        if isinstance(active_space, AutoActiveSpace):
+            kw["auto_active"], active_space = active_space, None
         ae, ao = (None, None) if active_space is None else active_space
         return cls(spec.geometry(r), basis=basis, charge=spec.charge, spin=spec.spin,
                    active_electrons=ae, active_orbitals=ao, mapping=mapping,
@@ -166,4 +180,6 @@ class MolecularProblem:
         return (f"{self.name}: basis={self.basis}, mapping={self.mapping.name}, "
                 f"active=({self.n_electrons}e,{self.n_orbitals}o), frozen core={self.n_frozen}, "
                 f"qubits={self.n_qubits}, Pauli terms={len(self.hamiltonian)}\n"
-                f"  E_HF  = {self.e_hf:.10f} Ha\n  E_FCI = {self.e_fci:.10f} Ha (active space)")
+                f"  E_HF  = {self.e_hf:.10f} Ha\n  E_FCI = {self.e_fci:.10f} Ha (active space)"
+                + (f"\n  {self.active_choice.describe()}" if self.active_choice else "")
+                + "".join(f"\n  WARNING: {w}" for w in (self.active_choice.warnings if self.active_choice else [])))

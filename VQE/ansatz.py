@@ -25,7 +25,7 @@ from dataclasses import dataclass, field
 import numpy as np
 
 from qcore.circuit import Circuit, Generator
-from qcore.excitations import (doubles, excitation_generator, pair_doubles, singles)
+from qcore.excitations import (doubles, excitation_generator, pair_doubles, screen_excitations, singles)
 from qcore.pauli import PauliSum
 
 
@@ -49,7 +49,9 @@ class UCC(Ansatz):
 
     excitations: "sd", "d", "s"; generalized: use generalized excitations;
     kind: "fermionic" or "qubit"; reps: number of Trotter-like repetitions,
-    each with its own parameters (``share_params=True`` -> one set, angle / reps).
+    each with its own parameters (``share_params=True`` -> one set, angle / reps);
+    screen_tol: drop symmetry-forbidden doubles (``qcore.excitations.screen_excitations``,
+    1e-8 is the usual value; None keeps all). Not available for generalized excitations.
     """
     excitations: str = "sd"
     generalized: bool = False
@@ -57,6 +59,7 @@ class UCC(Ansatz):
     reps: int = 1
     share_params: bool = False
     name: str = "uccsd"
+    screen_tol: float | None = None
 
     def excitation_list(self, problem):
         args = (problem.n_orbitals, problem.n_alpha, problem.n_beta, self.generalized)
@@ -65,6 +68,11 @@ class UCC(Ansatz):
             out += singles(*args)
         if "d" in self.excitations:
             out += doubles(*args)
+        if self.screen_tol is not None:
+            if self.generalized:
+                raise ValueError("screening needs occupied -> virtual excitations; not available for "
+                                 f"{self.name}")
+            out = screen_excitations(problem, out, self.screen_tol)
         return out
 
     def build(self, problem) -> Circuit:
