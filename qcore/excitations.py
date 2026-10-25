@@ -93,6 +93,21 @@ def excitation_generator(mapping: FermionQubitMapping, exc: Excitation, kind: st
     raise ValueError(f"unknown excitation kind {kind!r}")
 
 
+def imaginary_hopping_generator(mapping: FermionQubitMapping, p: int, q: int) -> Generator:
+    """i (a^dag_p a_q + a^dag_q a_p): the imaginary part of a complex orbital rotation."""
+    t = mapping.ladder_product([(q, 1), (p, 0)])
+    return Generator.from_pauli_sum(1j * (t + t.dagger()), label=f"i-hop({p},{q})")
+
+
+def number_number_generator(mapping: FermionQubitMapping, p: int, q: int) -> Generator:
+    """i n_p n_q (diagonal; the identity component, a global phase, is dropped)."""
+    op = mapping.number(p) * mapping.number(q) if p != q else mapping.number(p)
+    op = 1j * op
+    keep = ~((op.x == 0) & (op.z == 0))
+    op = PauliSum(op.n_qubits, op.x[keep], op.z[keep], op.c[keep])
+    return Generator.from_pauli_sum(op, label=f"i n{p} n{q}")
+
+
 SCREEN_TOL = 1e-8
 
 

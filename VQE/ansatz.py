@@ -16,6 +16,11 @@ Available (``get_ansatz(name, **kw)``):
   puccd      pair UCCD (seniority-zero)
   quccsd     qubit-excitation-based UCCSD (Yordanov et al.), Jordan-Wigner only
   hea        hardware-efficient ansatz (RY/RZ layers + CNOT/CZ entanglers)
+  fabric     symmetry-preserving gate fabric of Givens rotations (Anselmetti et al., NJP 23,
+             113010 (2021)): conserves N, S_z and S^2, nearest-neighbour orbitals only
+  lucj       local unitary cluster Jastrow (Motta et al., Chem. Sci. 14, 11213 (2023))
+  spa        separable pair approximation (Kottmann & Aspuru-Guzik, PRA 105, 032449 (2022));
+             use with orbital optimization (VQE.orbital_opt)
   custom     user-supplied list of Generators / Pauli strings
 """
 from __future__ import annotations
@@ -25,7 +30,8 @@ from dataclasses import dataclass, field
 import numpy as np
 
 from qcore.circuit import Circuit, Generator
-from qcore.excitations import (doubles, excitation_generator, pair_doubles, screen_excitations, singles)
+from qcore.excitations import (doubles, excitation_generator, imaginary_hopping_generator,
+                               number_number_generator, pair_doubles, screen_excitations, singles)
 from qcore.pauli import PauliSum
 
 
@@ -112,6 +118,7 @@ class KUpCCGSD(Ansatz):
     k: int = 2
     init_scale: float = 0.01
     name: str = "kupccgsd"
+    orbital_dependent = True  # pair ansatz: orbital optimization also rotates active orbitals
 
     def build(self, problem) -> Circuit:
         n, m = problem.n_orbitals, problem.mapping
@@ -136,6 +143,7 @@ class KUpCCGSD(Ansatz):
 class PUCCD(Ansatz):
     """Pair UCCD: seniority-zero pair excitations from occupied to virtual spatial orbitals."""
     name: str = "puccd"
+    orbital_dependent = True
 
     def build(self, problem) -> Circuit:
         circ = Circuit(problem.n_qubits, problem.hf_index)
@@ -192,6 +200,183 @@ class HardwareEfficient(Ansatz):
         return self.init_scale * rng.standard_normal(circuit.n_params)
 
 
+def _spin_adapted_rotation(circ, mapping, p, q, param, scale=1.0, imaginary=False):
+    """exp(scale theta (E_pq - E_qp)) (or its imaginary counterpart) on spatial orbitals p, q:
+    the same rotation for alpha and beta, which commute, so two exact exponentials."""
+    for s in (0, 1):
+        g = (imaginary_hopping_generator(mapping, 2 * q + s, 2 * p + s) if imaginary
+             else excitation_generator(mapping, ((2 * p + s,), (2 * q + s,))))
+        circ.add_generator(g, param, scale)
+
+
+def _brick_wall(n):
+    """Nearest-neighbour pairs (p, p+1): even bonds, then odd bonds."""
+    return [(p, p + 1) for p in range(0, n - 1, 2)] + [(p, p + 1) for p in range(1, n - 1, 2)]
+
+
+@dataclass(repr=False)
+class GateFabric(Ansatz):
+    """Quantum-number-preserving gate fabric (Anselmetti, Wierichs, Gogolin & Parrish, New J.
+    Phys. 23, 113010 (2021)).
+
+    Each layer is a brick wall of 4-qubit QNP gates on neighbouring spatial orbitals (p, p+1);
+    a gate is a pair exchange exp(theta (P^dag_{p+1} P_p - h.c.)) followed by a spin-adapted
+    orbital rotation (a Givens rotation, the same for alpha and beta). Every gate conserves
+    particle number, S_z and S^2, and under Jordan-Wigner acts on four adjacent qubits only, so
+    this is a hardware-style ansatz without the symmetry breaking of ``hea``. ``layers``
+    defaults to the number of orbitals (fewer layers are much less accurate). All parameters
+    start at small random values (zero is a saddle point).
+    """
+    layers: int | None = None
+    init_scale: float = 0.01
+    name: str = "fabric"
+
+    def build(self, problem) -> Circuit:
+        n, m = problem.n_orbitals, problem.mapping
+        circ = Circuit(problem.n_qubits, problem.hf_index)
+        for layer in range(self.layers or n):
+            for p, q in _brick_wall(n):
+                exc = ((2 * p, 2 * p + 1), (2 * q, 2 * q + 1))
+                circ.add_generator(excitation_generator(m, exc), circ.new_parameter(f"px{p}{q}#{layer}"))
+                _spin_adapted_rotation(circ, m, p, q, circ.new_parameter(f"or{p}{q}#{layer}"))
+        return circ
+
+    def initial_parameters(self, circuit, rng=None):
+        rng = rng or np.random.default_rng(0)
+        return self.init_scale * rng.standard_normal(circuit.n_params)
+
+
+@dataclass(repr=False)
+class LUCJ(Ansatz):
+    """Local unitary cluster Jastrow ansatz (Motta, Sung, Whaley, Head-Gordon & Shee, Chem.
+    Sci. 14, 11213 (2023)):
+
+        |psi> = prod_mu  exp(K_mu) exp(i J_mu) exp(-K_mu) |HF>
+
+    * exp(K) is a general orbital rotation (the same for both spins), built as a brick wall of
+      n_orbitals layers of nearest-neighbour complex Givens rotations (a real and an imaginary
+      generator each) followed by orbital phases: n^2 real parameters, the dimension of U(n).
+      The same parameters, with opposite sign and in reverse order, give exp(-K).
+    * J is a density-density (Jastrow) operator restricted by ``interactions``:
+      "square" -- same-spin neighbours n_{p,s} n_{p+1,s} and opposite spins on the same orbital
+      n_{p,a} n_{p,b}; "heavy-hex" -- as square, opposite-spin terms only on every fourth
+      orbital; "all" -- every pair (the non-local UCJ ansatz).
+
+    Conserves N and S_z exactly; like the spin-balanced ansatz of the paper, the same-spin
+    density terms do not commute with S^2, so <S^2> is only approximately conserved.
+    The paper initializes from CCSD amplitudes; here the parameters start small and random
+    (``init_scale``), since all-zero is a saddle point. The state is complex; energies are real.
+    """
+    layers: int = 1
+    interactions: str = "square"
+    init_scale: float = 0.05
+    name: str = "lucj"
+    orbital_dependent = True
+
+    def _jastrow_terms(self, n):
+        same = [(p, p + 1) for p in range(n - 1)]
+        if self.interactions == "square":
+            opp = [(p, p) for p in range(n)]
+        elif self.interactions == "heavy-hex":
+            opp = [(p, p) for p in range(0, n, 4)]
+        elif self.interactions == "all":
+            same = [(p, q) for p in range(n) for q in range(p + 1, n)]
+            opp = [(p, q) for p in range(n) for q in range(p, n)]
+        else:
+            raise ValueError(f"interactions must be square, heavy-hex or all, got {self.interactions!r}")
+        return same, opp
+
+    def build(self, problem) -> Circuit:
+        n, m = problem.n_orbitals, problem.mapping
+        circ = Circuit(problem.n_qubits, problem.hf_index)
+        same, opp = self._jastrow_terms(n)
+        givens = [pq for _ in range(n) for pq in _brick_wall(n)] if n > 1 else []
+        for mu in range(self.layers):
+            g_params = [(circ.new_parameter(f"K{p}{q}re#{mu}"), circ.new_parameter(f"K{p}{q}im#{mu}"))
+                        for p, q in givens]
+            phases = [circ.new_parameter(f"phi{p}#{mu}") for p in range(n)]
+            # exp(-K) = (D G)^dag = G^dag D^dag: phases first, then the Givens network reversed
+            for p, ph in enumerate(phases):
+                for s in (0, 1):
+                    circ.add_generator(number_number_generator(m, 2 * p + s, 2 * p + s), ph, -1.0)
+            for (p, q), (re, im) in reversed(list(zip(givens, g_params))):
+                _spin_adapted_rotation(circ, m, p, q, im, -1.0, imaginary=True)
+                _spin_adapted_rotation(circ, m, p, q, re, -1.0)
+            # exp(i J)
+            for p, q in same:
+                par = circ.new_parameter(f"Jaa{p}{q}#{mu}")
+                for s in (0, 1):
+                    circ.add_generator(number_number_generator(m, 2 * p + s, 2 * q + s), par)
+            for p, q in opp:  # n_{p,a} n_{q,b} + n_{q,a} n_{p,b}: one parameter keeps S^2
+                par = circ.new_parameter(f"Jab{p}{q}#{mu}")
+                circ.add_generator(number_number_generator(m, 2 * p, 2 * q + 1), par)
+                if p != q:
+                    circ.add_generator(number_number_generator(m, 2 * q, 2 * p + 1), par)
+            # exp(K) = D G
+            for (p, q), (re, im) in zip(givens, g_params):
+                _spin_adapted_rotation(circ, m, p, q, re)
+                _spin_adapted_rotation(circ, m, p, q, im, imaginary=True)
+            for p, ph in enumerate(phases):
+                for s in (0, 1):
+                    circ.add_generator(number_number_generator(m, 2 * p + s, 2 * p + s), ph)
+        return circ
+
+    def initial_parameters(self, circuit, rng=None):
+        rng = rng or np.random.default_rng(0)
+        return self.init_scale * rng.standard_normal(circuit.n_params)
+
+
+@dataclass(repr=False)
+class SPA(Ansatz):
+    """Separable pair approximation (Kottmann & Aspuru-Guzik, Phys. Rev. A 105, 032449 (2022)).
+
+    Every electron pair lives in its own set of spatial orbitals: its occupied orbital i plus the
+    virtual orbitals assigned to it. Within that set the pair is rotated by pair excitations
+    exp(theta (P^dag_a P_i - h.c.)) applied one after another from i, which reach any real pair
+    state in the set. Pairs in disjoint sets commute, so the state is a product of pair functions
+    (separable): very shallow circuits, but only accurate in suitable orbitals, so it is meant to
+    be used with orbital optimization (``VQE.orbital_opt``; ``orbital_dependent``).
+
+    ``pairs``: optional list, one entry per occupied active orbital, of the virtual active orbitals
+    (indices into the active space) assigned to it. By default each virtual goes to the occupied
+    orbital with the largest exchange integral (ia|ia), keeping the sets as equal in size as
+    possible. Closed shells only.
+    """
+    pairs: list | None = None
+    name: str = "spa"
+    orbital_dependent = True
+
+    def assignment(self, problem) -> list[list[int]]:
+        if problem.n_alpha != problem.n_beta:
+            raise ValueError("SPA needs a closed-shell reference (N_alpha == N_beta)")
+        n_occ, n = problem.n_alpha, problem.n_orbitals
+        virt = list(range(n_occ, n))
+        if self.pairs is not None:
+            if len(self.pairs) != n_occ or sorted(a for s in self.pairs for a in s) != sorted(set(a for s in self.pairs for a in s)) \
+                    or any(a not in virt for s in self.pairs for a in s):
+                raise ValueError(f"pairs must give {n_occ} disjoint lists of virtual orbitals from {virt}")
+            return [list(s) for s in self.pairs]
+        h2 = problem.h2
+        cap = -(-len(virt) // n_occ)  # ceil
+        sets = [[] for _ in range(n_occ)]
+        cand = sorted(((abs(h2[i, a, i, a]), i, a) for i in range(n_occ) for a in virt), reverse=True)
+        placed = set()
+        for _, i, a in cand:
+            if a not in placed and len(sets[i]) < cap:
+                sets[i].append(a)
+                placed.add(a)
+        return [sorted(s) for s in sets]
+
+    def build(self, problem) -> Circuit:
+        m = problem.mapping
+        circ = Circuit(problem.n_qubits, problem.hf_index)
+        for i, virts in enumerate(self.assignment(problem)):
+            for a in virts:
+                exc = ((2 * i, 2 * i + 1), (2 * a, 2 * a + 1))
+                circ.add_generator(excitation_generator(m, exc), circ.new_parameter(f"spa{i}->{a}"))
+        return circ
+
+
 @dataclass(repr=False)
 class CustomAnsatz(Ansatz):
     """Product of exp(theta_k G_k) for user-supplied generators.
@@ -219,6 +404,8 @@ ANSATZE = {
     "uccsd": UCCSD, "uccd": UCCD, "uccgsd": UCCGSD, "quccsd": QUCCSD,
     "kupccgsd": KUpCCGSD, "upccgsd": KUpCCGSD, "puccd": PUCCD,
     "hea": HardwareEfficient, "hardware_efficient": HardwareEfficient,
+    "fabric": GateFabric, "gatefabric": GateFabric, "qnp": GateFabric,
+    "lucj": LUCJ, "spa": SPA,
 }
 
 

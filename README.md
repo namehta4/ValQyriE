@@ -56,7 +56,8 @@ to experiment depends on those two choices.
 ## Features
 
 * Any popular ansatz: UCCSD, UCCD, UCCGSD, k-UpCCGSD, pUCCD, qubit-excitation UCCSD, hardware-efficient,
-  ADAPT-VQE (fermionic / QEB / qubit pools), or your own generators.
+  symmetry-preserving gate fabric, LUCJ, SPA, ADAPT-VQE (fermionic / QEB / qubit / CEO pools,
+  optionally TETRIS), or your own generators; any of them with orbital optimization (oo-VQE).
 * Any of Jordan-Wigner, Bravyi-Kitaev or parity encodings.
 * Benchmark molecules (H2, HeH+, LiH, BeH2, H2O, NH3, CH4, HF, N2, CO, O2 triplet, H4/H6 chains, H4 ring),
   any PySCF basis, any active space, or any geometry you provide.
@@ -75,9 +76,11 @@ ValQyriE/
 │   ├── hamiltonian.py  second-quantised H -> qubit H; N, S_z, S^2 operators
 │   ├── problem.py      MolecularProblem: PySCF RHF/ROHF, CASCI active space, references
 │   ├── molecules.py    molecule library (experimental r_e geometries)
-│   ├── excitations.py  fermionic / qubit excitation generators, operator pools
+│   ├── excitations.py  fermionic / qubit excitation generators, operator pools, screening
+│   ├── active_space.py opt-in MP2 active-space selection
+│   ├── fci_interface.py qubit state <-> PySCF CI vector, density matrices
 │   └── circuit.py      exact statevector circuits + adjoint-method gradients
-├── VQE/              VQE, ansatze, ADAPT-VQE, CLI (python -m VQE)
+├── VQE/              VQE, ansatze, ADAPT-VQE (CEO, TETRIS), orbital-optimized VQE, CLI (python -m VQE)
 ├── GQE/              GPT model, operator pool, GQE training loop, CLI (python -m GQE)
 ├── stress/           verified CPU stress test + system ceilings (python -m stress)
 ├── examples/         benchmark.py, dissociation_curve.py, stress/*.json case files
@@ -103,7 +106,11 @@ VQE alone does not need PyTorch: `pip install -e .`.
 ```bash
 python -m VQE --molecule LiH --ansatz uccsd                 # UCCSD, Jordan-Wigner
 python -m VQE --molecule H2O --ansatz adapt --pool qeb -v   # ADAPT-VQE with qubit-excitation pool
+python -m VQE --molecule LiH --ansatz adapt --pool ceo --tetris -v   # TETRIS-CEO-ADAPT-VQE
 python -m VQE --molecule N2 --ansatz kupccgsd --layers 2 --mapping bk
+python -m VQE --molecule H2O --ansatz fabric                 # symmetry-preserving gate fabric
+python -m VQE --molecule H6 --ansatz lucj --layers 2         # local unitary cluster Jastrow
+python -m VQE --molecule H6 --bond-length 2.0 --ansatz spa --orbital-opt   # oo-SPA, vs CASSCF
 python -m VQE --molecule H2 --ansatz hea --layers 3 --number-penalty 0.5 --spin-penalty 0.5
 python -m VQE --molecule LiH --bond-length 2.5 --basis 6-31g --active 2,5
 python -m VQE --molecule N2 --basis 6-31g --active 6,8 --screen  # drop symmetry-forbidden doubles
@@ -167,7 +174,106 @@ the penalties. Results report the error vs FCI, the fraction of correlation ener
 
 ADAPT-VQE follows Grimsley et al. 2019: it selects the pool operator with the largest |⟨[H, A]⟩|,
 then re-optimises all parameters with warm starts. Pools: fermionic, generalized, QEB (Yordanov 2020),
-qubit (Tang 2021).
+qubit (Tang 2021) and CEO (Ramôa et al., npj Quantum Inf. 2025, arXiv:2407.08696). Two newer
+options come from the literature:
+
+* **CEO pool** (`--pool ceo`, Jordan-Wigner only). The qubit excitations acting on the same four qubits
+  (two of them for opposite-spin sets, three for same-spin sets) are combined into *coupled exchange
+  operators*. The selected operator is either a one-parameter sum or difference θ(T_a ± T_b) (a 9-CNOT
+  circuit), or, when more than one of the excitations on those qubits has a nonzero gradient, the
+  excitations with one parameter each (13 CNOTs, the cost of a single qubit excitation). This follows
+  the selection rule of the paper.
+* **TETRIS** (`--tetris`, Anastasiou et al., arXiv:2209.10562). Each iteration adds, in order of
+  gradient size, every operator with a nonzero gradient whose qubits don't overlap those already
+  chosen. Operators on disjoint qubits run in parallel on hardware, so circuits get shallower and
+  fewer iterations are needed (fewer rounds of gradient measurements on hardware). It suits the
+  pools whose operators act on at most four qubits (`qeb`, `qubit`, `ceo`). Fermionic operators carry
+  Jordan-Wigner strings and almost never have disjoint qubits.
+
+`AdaptResult.cnot_count` adds up the CNOTs of the published circuit for every added operator: 2 for
+a single qubit excitation, 13 for a double, 9 for a one-parameter CEO, 13 for a multi-parameter CEO,
+and a CNOT ladder of 2(w − 1) for each Pauli string of weight w in the qubit and fermionic pools. It
+is a hardware-cost estimate; the simulation itself applies every operator exactly.
+`at_accuracy()` gives the iteration, parameters, CNOT count and CNOT depth of the shortest circuit
+along the run that was within chemical accuracy. `cnot_depth` schedules each operator as early as its
+qubits allow, which is where TETRIS gains.
+
+**Which ADAPT pool?** Resources of the first circuit within chemical accuracy (CNOT count / CNOT
+depth; ✗ = never reached), STO-3G, Jordan-Wigner, `grad_tol` 1e-3. The stretched geometries are the
+ones used by Ramôa et al.:
+
+| problem | qubits | fermionic | QEB | TETRIS-QEB | qubit | CEO | TETRIS-CEO |
+|---|---|---|---|---|---|---|---|
+| LiH, equilibrium | 12 | 400 / 400 | 65 / 55 | 91 / 33 | 30 / 30 | 45 / 35 | 63 / 21 |
+| BeH2, equilibrium | 12 | 608 / 560 | 130 / 77 | 173 / 66 | 60 / 42 | 93 / 54 | 129 / 48 |
+| H2O, equilibrium | 12 | 1168 / 1072 | 221 / 121 | 273 / 88 | 102 / 60 | 148 / 85 | 175 / 72 |
+| LiH, 3.0 Å | 12 | 392 / 392 | 69 / 57 | 151 / 46 | 58 / 58 | 49 / 37 | 107 / 30 |
+| BeH2, 2.0 Å | 12 | 1520 / 1472 | 279 / 178 | 320 / 110 | 258 / 210 | 164 / 96 | 213 / 75 |
+| H6, 1.5 Å | 12 | 5536 / 5264 | 1318 / 879 | 1395 / 429 | ✗ | 787 / 617 | 862 / 295 |
+
+* For LiH at 3.0 Å, TETRIS-CEO needs 107 CNOTs at depth 30, the same as Table I of Ramôa et al.
+  (107 / 30). For H6 at 1.5 Å it needs 862 / 295, against the paper's 812 / 282, which also uses
+  further measurement-saving techniques. (Our BeH2 freezes the Be 1s core, 12 qubits, so it is not
+  comparable with the paper's 14-qubit result.)
+* **CEO** is the best choice for hard (stretched, strongly correlated) problems: fewest CNOTs on
+  BeH2 at 2.0 Å and H6 at 1.5 Å. **TETRIS** cuts the circuit depth by 2-3× and halves the iterations,
+  for 10-40% more CNOTs. The **qubit** pool gives the fewest CNOTs on easy molecules near equilibrium,
+  but needs many more iterations and fails on H6. **Fermionic** circuits are 5-10× more expensive
+  in CNOTs; all pools reach similar final energies.
+* Rerun with `python examples/benchmark.py --ansatz adapt-qeb adapt-ceo adapt-ceo-tetris`.
+
+### Newer ansätze and orbital optimization
+
+* **Gate fabric** (`fabric`; Anselmetti et al., New J. Phys. 23, 113010 (2021)). A hardware-style
+  circuit that, unlike `hea`, keeps the electron number, S_z and S² exact. Each layer is a brick
+  wall of 4-qubit gates on neighbouring orbitals: a pair exchange followed by a Givens orbital
+  rotation. `--layers` defaults to the number of orbitals; fewer layers are much less accurate.
+* **LUCJ** (`lucj`; Motta et al., Chem. Sci. 14, 11213 (2023)). The ansatz IBM uses for chemistry
+  on its hardware: |ψ⟩ = Π e^K e^{iJ} e^{−K} |HF⟩. Here e^K is a general orbital rotation (a
+  network of nearest-neighbour Givens rotations), and J holds density-density terms restricted to
+  what the qubit layout connects (`--interactions square`, `heavy-hex` or `all`). It conserves N and
+  S_z, but S² only approximately, as in the paper. The paper starts from CCSD amplitudes; here the
+  parameters start small and random, so use 2 layers.
+* **SPA, separable pair approximation** (`spa`; Kottmann & Aspuru-Guzik, Phys. Rev. A 105, 032449
+  (2022)). Every electron pair gets its own orbitals, so the circuit is a product of independent
+  pair functions: the fewest parameters and the shallowest circuit of all. Only accurate in good
+  orbitals, so run it with `--orbital-opt`. The virtual orbitals are assigned to pairs automatically
+  (largest exchange integral) or with `SPA(pairs=[[...], ...])`.
+* **Orbital optimization** (`--orbital-opt`, `OrbitalOptimizedVQE`; Mizukami et al. 2020, Sokolov
+  et al. 2020). The orbitals are optimized together with the circuit, i.e. CASSCF with VQE as the
+  solver. It alternates VQE in the current orbitals with orbital steps driven by the VQE state's
+  density matrices, using PySCF's analytic orbital gradient. Each orbital step is accepted only if
+  it lowers the energy, so the energy never goes up. The reference is CASSCF, the exact answer for
+  orbital-optimized methods. Pair ansätze (`puccd`, `spa`, `kupccgsd`, `lucj`) also rotate the
+  active orbitals among themselves and start from Boys-localized orbitals (`--initial-orbitals`).
+
+Error vs FCI in Ha (parameters), STO-3G, Jordan-Wigner, default settings. oo-pUCCD and oo-SPA
+include orbital optimization; their error is against FCI in the Hartree-Fock orbitals, which for N2
+lies 15 mHa above CASSCF:
+
+| | H4, 1.0 Å | H4, 2.0 Å | H6, 2.0 Å | LiH | H2O | N2 |
+|---|---|---|---|---|---|---|
+| UCCSD | 8.0e-5 (26) | 4.6e-3 (26) | 1.3e-2 (117) | 1.1e-5 (92) | 1.0e-4 (92) | 4.1e-4 (117) |
+| k-UpCCGSD | 1e-14 (24) | 1.8e-2 (24) | 2.4e-2 (60) | 4.4e-9 (60) | 7.8e-5 (60) | 1.7e-3 (60) |
+| gate fabric | 3e-15 (24) | 3e-15 (24) | 4.5e-3 (60) | 2.2e-8 (60) | 1.6e-3 (60) | 1.8e-2 (60) |
+| LUCJ, 1 layer | 4.5e-3 (35) | 1.0e-2 (35) | 2.6e-2 (77) | 2.2e-4 (77) | 3.0e-3 (77) | 1.8e-2 (77) |
+| LUCJ, 2 layers | 4.3e-6 (70) | 5.1e-5 (70) | 5.1e-3 (154) | 1.5e-5 (154) | 7.7e-4 (154) | 7.2e-3 (154) |
+| oo-pUCCD | 3.1e-2 (4) | 3.2e-2 (4) | 1.5e-2 (9) | 1.2e-4 (8) | 6.6e-3 (8) | 4.4e-2 (9) |
+| oo-SPA | 3.7e-2 (2) | 3.2e-2 (2) | 1.5e-2 (3) | 1.2e-3 (4) | 9.4e-3 (2) | 4.5e-2 (3) |
+
+**Which one should I use?**
+
+| goal | ansatz |
+|---|---|
+| an accurate energy, standard method | `uccsd`, or ADAPT with `--pool ceo` |
+| a circuit that could run on hardware and keeps all symmetries | `fabric` |
+| IBM-style hardware studies (square / heavy-hex layouts) | `lucj --layers 2` |
+| the fewest parameters, qualitative bond breaking | `spa` or `puccd` with `--orbital-opt` |
+| better orbitals for any ansatz | add `--orbital-opt` |
+
+The pair ansätze (pUCCD, SPA) treat electrons only in pairs, which limits them to about 1-5·10⁻² Ha
+here. That accuracy is the price of their tiny circuits, not a bug. The gate fabric and LUCJ can get
+stuck in local minima (N2 above), because they start from random parameters.
 
 ### GQE (GPT-QE)
 This follows Nakaji et al., arXiv:2401.09253. The vocabulary is {(G_k, t)}: excitation generators ×

@@ -111,6 +111,35 @@ class MolecularProblem:
                    active_electrons=ae, active_orbitals=ao, mapping=mapping,
                    name=f"{spec.name}(r={r:.4f})", **kw)
 
+    @classmethod
+    def from_integrals(cls, h1, h2, e_core: float, n_alpha: int, n_beta: int, mapping="jw",
+                       name: str = "integrals", e_fci: float | None = None) -> "MolecularProblem":
+        """Problem defined directly by active-space integrals (h1[p,q], h2 in chemists' notation,
+        any PySCF symmetry packing). ``e_fci`` defaults to an exact PySCF FCI; pass ``nan`` to skip
+        it. ``e_hf`` is the energy of the lowest determinant (orbitals 0.. occupied)."""
+        from pyscf import ao2mo, fci
+        self = cls.__new__(cls)
+        n = np.asarray(h1).shape[0]
+        self.name, self.basis, self.mol, self.mf, self.active_choice = name, "-", None, None, None
+        self.h1 = np.asarray(h1, dtype=float)
+        self.h2 = ao2mo.restore(1, np.asarray(h2), n)
+        self.e_core = float(e_core)
+        self.n_alpha, self.n_beta = int(n_alpha), int(n_beta)
+        self.n_orbitals, self.n_electrons, self.n_frozen = n, self.n_alpha + self.n_beta, 0
+        self.n_qubits = 2 * n
+        self.mapping = get_mapping(mapping, self.n_qubits) if isinstance(mapping, str) else mapping
+        if e_fci is None:
+            e_fci = fci.direct_spin1.kernel(self.h1, self.h2, n, (self.n_alpha, self.n_beta), ecore=self.e_core)[0]
+        self.e_fci = float(e_fci)
+        d = np.diag(self.h1)
+        jj = np.einsum("ppqq->pq", self.h2)
+        kk = np.einsum("pqqp->pq", self.h2)
+        oa, ob = np.arange(self.n_alpha), np.arange(self.n_beta)
+        self.e_hf = float(self.e_core + d[oa].sum() + d[ob].sum()
+                          + 0.5 * (jj[np.ix_(oa, oa)] - kk[np.ix_(oa, oa)]).sum()
+                          + 0.5 * (jj[np.ix_(ob, ob)] - kk[np.ix_(ob, ob)]).sum() + jj[np.ix_(oa, ob)].sum())
+        return self
+
     # ------------------------------------------------------------- qubit ops
     @cached_property
     def hamiltonian(self) -> PauliSum:
