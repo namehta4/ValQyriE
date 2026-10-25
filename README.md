@@ -171,9 +171,12 @@ Each GQE run takes about 70 s on one CPU thread.
 ## CPU stress test and system ceilings (`stress/`)
 
 `python -m stress` turns the solvers' numerical kernels into a **self-verifying CPU stress test**, built
-for qualifying cluster hardware (e.g. Student Cluster Competition nodes). Every result is checked
-exactly or against physics, so a marginal CPU, a bad core, an unstable overclock/undervolt, overheating
-or memory errors show up as **failures** rather than as a slightly lower benchmark number.
+for qualifying cluster hardware (e.g. Student Cluster Competition nodes). The tool knows the correct
+answer to every computation it runs and checks each result against it. A healthy machine passes every
+check. Unstable hardware often doesn't crash: it silently returns a wrong number (*silent data
+corruption*). Typical causes are a marginal CPU, a bad core, an aggressive overclock/undervolt or BIOS
+power setting, overheating, or memory errors. Here such errors are reported as **failures**, with the
+offending core named. An ordinary benchmark would only show them as a slightly different score.
 
 ```bash
 python -m stress info                         # hardware, ISA, runtime SIMD, estimated ceilings (no load)
@@ -201,6 +204,18 @@ Each workload is also checked against its own first result, bit for bit. `--size
 chooses working sets that fit in L2, fit in L3, or spill to DRAM. `--mode phases` runs one workload
 at a time to give clean per-workload numbers; `--mode mixed` has every core cycle through all of them
 for maximum variation in thermal and power load.
+
+The `vqe` workload accepts any molecule in the library through `--molecule` (case-insensitive):
+H2, HeH+, LiH, BeH2, H2O, NH3, CH4, HF, N2, CO, O2, H4, H6 or H4-ring, at their default geometry,
+basis and active space. When it is not given, the default depends on `--size`: H4 for `cache`, H2O
+for `auto`/`llc`, and NH3 for `dram`. Bigger molecules mean more qubits and more work per step:
+
+```bash
+python -m stress run --workloads vqe --molecule CH4 --duration 600
+```
+
+NH3 and CH4 (14 qubits) are the heaviest. H2 and HeH+ (4 qubits) finish a step in microseconds, so
+they measure Python overhead more than the CPU and are not useful as a stress load.
 
 ### "What the system can achieve at most"
 
@@ -239,9 +254,11 @@ from RAPL, which needs root on most kernels. Everything degrades gracefully when
 4. Workers allocate their arrays after pinning, so on multi-socket and NUMA nodes memory lands on
    the local node through first-touch allocation.
 
-This tool is not a maximum-power burner like HPL or Prime95: NumPy's multi-pass kernels draw less
-power. Use it to find wrong answers and stability problems; use HPL (which SCC runs anyway) for the
-thermal worst case. On Apple silicon, BLAS runs on the AMX/SME matrix unit, so measured GEMM can
+**Correctness vs. maximum load.** This tool checks that the hardware *computes correctly* under the
+real VQE/GQE workload at your chosen clocks and BIOS settings. It is not designed to reach the
+highest possible power draw. Python/NumPy overhead keeps its power and heat below those of HPL or
+Prime95. Use both: HPL (which SCC runs anyway) shows the cluster survives the thermal and power worst
+case, and `python -m stress run` shows it still gives correct answers. On Apple silicon, BLAS runs on the AMX/SME matrix unit, so measured GEMM can
 exceed the vector-ISA estimate; the tool says so when it happens.
 
 ## Limits and scope

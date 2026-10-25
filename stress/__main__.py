@@ -322,6 +322,12 @@ def main(argv=None):
     r.add_argument("--peak-seconds", type=float, default=4.0)
     r.add_argument("-o", "--output", help="write a JSON report")
     args = ap.parse_args(argv)
+    if getattr(args, "molecule", None):
+        from qcore.molecules import get_molecule
+        try:
+            get_molecule(args.molecule)  # fail before the (slow) peak measurement
+        except ValueError as exc:
+            sys.exit(f"error: {exc}")
 
     comm = Comm(args.mpi)
     log = log_fn(comm)
