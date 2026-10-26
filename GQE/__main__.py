@@ -5,7 +5,7 @@ import argparse
 import json
 import sys
 
-from qcore import MolecularProblem, list_molecules
+from qcore import MolecularProblem, active_space, list_molecules
 
 from .gqe import GQE, GQEConfig
 

@@ -26,3 +26,9 @@ def test_gqe_lih_refined():
     p = MolecularProblem.from_library("LiH")
     r = GQE(p, seed=0).run()
     assert abs(r.refined_error) < CHEMICAL_ACCURACY
+
+
+def test_cli_h2(capsys):
+    from GQE.__main__ import main
+    main(["--molecule", "H2", "--iterations", "10", "--batch-size", "8", "--active", "2,2"])
+    assert "E_GQE" in capsys.readouterr().out
