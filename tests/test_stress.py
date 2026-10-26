@@ -114,3 +114,24 @@ def test_vqe_workload_auto_active_space():
     pay = vqe_payload({"molecule": "H2O", "active_space": {"method": "auto", "max_qubits": 8}})
     assert pay["n_qubits"] <= 8 and pay["auto_active"]["orbitals"]
     assert VQEEval(pay).step()[2] is None
+
+
+def test_short_mixed_run_warns(tmp_path):
+    # duration 0: each worker runs one dgemm step and stops before statevector's turn: untested, so WARN
+    import json
+    out = tmp_path / "r.json"
+    rc = main(["run", "--mode", "mixed", "--duration", "0", "--no-peak", "--workers", "2",
+               "--workloads", "dgemm,statevector", "--qubits", "10", "--dgemm-n", "128", "-o", str(out)])
+    rep = json.loads(out.read_text())
+    assert rc == 0 and rep["verdict"] == "WARN"
+    agg = rep["nodes"][0]["phases"][0]["result"]["aggregate"]
+    assert agg["dgemm"]["steps"] > 0 and agg["statevector"]["steps"] == 0
+    assert agg["statevector"]["inconsistent_cpus"] == []
+
+
+def test_dead_workers_fail():
+    from stress.__main__ import summarize
+    phase = {"workloads": ["dgemm"], "result": {"aggregate": {}, "lost_workers": [0, 1], "workers": [],
+                                                "telemetry_summary": {}}}
+    node = {"host": "n0", "phases": [phase]}
+    assert summarize([node], node["phases"], None, {}, 60, lambda *a: None) == "FAIL"

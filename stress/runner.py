@@ -92,7 +92,8 @@ def _worker(wid, cpu, specs, duration, barrier, q, hb_interval):
             break
     for st in stats.values():
         times = st.pop("step_times")
-        st.update(step_min=min(times), step_median=statistics.median(times), step_max=max(times))
+        if times:  # empty when the run ended before this workload's turn (mixed mode, short run)
+            st.update(step_min=min(times), step_median=statistics.median(times), step_max=max(times))
     q.put(("done", wid, {"cpu": cpu, "pinned": pinned, "elapsed": time.perf_counter() - t0, "workloads": stats}))
 
 
@@ -180,7 +181,8 @@ def aggregate(workers) -> dict:
             a["work"] += s["work"]
             a["fails"] += s["n_fails"]
             a["rates"].append(s["work"] / w["elapsed"])
-            a["fingerprints"].setdefault(s["first"], []).append(w["cpu"])
+            if s["steps"]:  # a worker with no finished step has no result to compare
+                a["fingerprints"].setdefault(s["first"], []).append(w["cpu"])
     for a in out.values():
         rates = a.pop("rates")
         a["rate_total"] = sum(rates)            # unit per second, all workers
@@ -188,6 +190,6 @@ def aggregate(workers) -> dict:
         a["rate_per_worker_max"] = max(rates)
         a["rate_per_worker_mean"] = sum(rates) / len(rates)
         fps = a.pop("fingerprints")
-        majority = max(fps.values(), key=len)
+        majority = max(fps.values(), key=len, default=None)
         a["inconsistent_cpus"] = sorted(c for cpus in fps.values() if cpus is not majority for c in cpus)
     return out

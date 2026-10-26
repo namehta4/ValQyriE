@@ -175,10 +175,11 @@ def merge_nodes(results):
             m["fails"] += a["fails"]
             m["rate_total"] += a["rate_total"]
             m["inconsistent"] += [f"{node['host']}:cpu{c}" for c in a["inconsistent_cpus"]]
-            m["fingerprints"].setdefault(a["majority_fingerprint"], []).append(node["host"])
+            if a["steps"]:
+                m["fingerprints"].setdefault(a["majority_fingerprint"], []).append(node["host"])
     for m in merged.values():
         fps = m.pop("fingerprints")
-        majority = max(fps.values(), key=len)
+        majority = max(fps.values(), key=len, default=None)
         m["inconsistent_nodes"] = sorted(h for hosts in fps.values() if hosts is not majority for h in hosts)
     return merged
 
@@ -255,9 +256,10 @@ def cmd_run(args, comm, log):
         for name, a in res["aggregate"].items():
             fps = {}
             for wk in res["workers"]:
-                fps.setdefault(wk["workloads"][name]["first"], 0)
-                fps[wk["workloads"][name]["first"]] += 1
-            a["majority_fingerprint"] = max(fps, key=fps.get)
+                if wk["workloads"][name]["steps"]:
+                    fps.setdefault(wk["workloads"][name]["first"], 0)
+                    fps[wk["workloads"][name]["first"]] += 1
+            a["majority_fingerprint"] = max(fps, key=fps.get, default=None)
         res["telemetry_summary"] = Telemetry.summarize(res["telemetry"])
         report_phases.append({"workloads": ph, "result": res})
 
@@ -267,18 +269,39 @@ def cmd_run(args, comm, log):
     nodes = comm.gather(node)
     if comm.rank != 0:
         return 0
-    log("\n== summary ==")
+    verdict = summarize(nodes, report_phases, measured, theo, args.duration, log)
+    if args.output:
+        with open(args.output, "w") as fh:
+            json.dump({"version": 1, "time": time.strftime("%Y-%m-%dT%H:%M:%S%z"), "verdict": verdict,
+                       "args": vars(args), "nodes": nodes}, fh, indent=1, default=str)
+        log(f"report written to {args.output}")
+    return 0 if verdict != "FAIL" else 1
+
+
+def summarize(nodes, report_phases, measured, theo, duration, log):
+    """Print the summary of every phase over all nodes and return the verdict.
+
+    FAIL: a verification failure, or a worker that died. WARN: results differ between cores or
+    nodes, or a workload never finished a step (the run was too short to test it)."""
+    order = ("PASS", "WARN", "FAIL")
     verdict = "PASS"
+
+    def worse(v):
+        nonlocal verdict
+        verdict = max(verdict, v, key=order.index)
+
+    log("\n== summary ==")
     for i, ph in enumerate(report_phases):
         merged = merge_nodes([{"host": n["host"], "aggregate": n["phases"][i]["result"]["aggregate"]}
                               for n in nodes])
         lost = sum(len(n["phases"][i]["result"]["lost_workers"]) for n in nodes)
         for name, m in merged.items():
-            agg = ph["result"]["aggregate"][name]
+            agg = ph["result"]["aggregate"].get(name)
             cf = ceiling_fraction(name, m["rate_total"] / len(nodes), measured, theo)
-            line = (f"  {name:<12} {m['rate_total']:12.4g} {UNITS[name]}/s total"
-                    f"  (per core {agg['rate_per_worker_min']:.3g}-{agg['rate_per_worker_max']:.3g})"
-                    f"  steps={m['steps']}  failures={m['fails']}")
+            line = f"  {name:<12} {m['rate_total']:12.4g} {UNITS[name]}/s total"
+            if agg:
+                line += f"  (per core {agg['rate_per_worker_min']:.3g}-{agg['rate_per_worker_max']:.3g})"
+            line += f"  steps={m['steps']}  failures={m['fails']}"
             if "pct_of_measured_peak" in cf:
                 line += f"  | {cf['pct_of_measured_peak']:.1f}% of measured {cf['precision']} GEMM peak"
             if "pct_of_theoretical_peak" in cf:
@@ -287,26 +310,26 @@ def cmd_run(args, comm, log):
                 line += f"  | >= {cf['min_traffic_gbs']:.1f} GB/s ({cf['pct_of_measured_bw']:.0f}% of triad)"
             log(line)
             ph.setdefault("ceilings", {})[name] = cf
-            if m["fails"] or lost:
-                verdict = "FAIL"
+            if m["fails"]:
+                worse("FAIL")
+            if not m["steps"]:
+                log(f"    WARNING: no {name} step finished within {duration:.0f} s, so {name} was not "
+                    "tested; increase --duration")
+                worse("WARN")
             if m["inconsistent"] or m["inconsistent_nodes"]:
                 log(f"    WARNING: results differ from the majority on {m['inconsistent'] + m['inconsistent_nodes']}")
-                verdict = "FAIL" if verdict == "FAIL" else "WARN"
+                worse("WARN")
             for wk in ph["result"]["workers"]:
                 for f in wk["workloads"][name]["fails"][:3]:
                     log(f"    cpu {wk['cpu']}: t={f['t']}s {f['error']}")
         if lost:
             log(f"    {lost} worker(s) died (OOM kill, crash or machine check?)")
+            worse("FAIL")
         ts = ph["result"]["telemetry_summary"]
         if ts:
             log("    telemetry: " + ", ".join(f"{k} {v['min']:.3g}..{v['max']:.3g}" for k, v in ts.items()))
     log(f"\nverdict: {verdict}")
-    if args.output:
-        with open(args.output, "w") as fh:
-            json.dump({"version": 1, "time": time.strftime("%Y-%m-%dT%H:%M:%S%z"), "verdict": verdict,
-                       "args": vars(args), "nodes": nodes}, fh, indent=1, default=str)
-        log(f"report written to {args.output}")
-    return 0 if verdict != "FAIL" else 1
+    return verdict
 
 
 def load_config(path, parser):
