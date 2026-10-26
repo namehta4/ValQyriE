@@ -24,7 +24,10 @@ mpi = ["mpi4py>=3.1"]               # multi-node stress runs (needs a system MPI
 stress = ["threadpoolctl>=3"]       # reports BLAS thread counts
 
 [tool.setuptools.packages.find]
-include = ["qcore*", "VQE*", "GQE*", "stress*"]
+include = ["qcore*", "VQE*", "GQE*", "stress*", "bench*"]
+
+[tool.setuptools.package-data]
+bench = ["data/*.npz", "data/*.json", "references/*.json"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

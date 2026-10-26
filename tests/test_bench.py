@@ -7,7 +7,7 @@ import pytest
 
 from bench import gate
 from bench.__main__ import main
-from bench.cases import CaseData, build_case
+from bench.cases import CASES, CaseData, build_case
 from bench.interface import ReferenceEvaluator, load_impl
 
 
@@ -60,3 +60,35 @@ def test_vqe_matches_reference():
 
 def test_starter_template_passes():
     assert main(["run", "lih-12q", "--impl", "examples/bench/my_evaluator.py:MyEvaluator"]) == 0
+
+
+def test_cases_are_shipped(monkeypatch):
+    # the shipped integrals make every case identical on every machine: PySCF is not needed
+    from qcore import MolecularProblem
+
+    def no_pyscf(*a, **k):
+        raise AssertionError("build_case must not rebuild a shipped case")
+    monkeypatch.setattr(MolecularProblem, "from_library", no_pyscf)
+    for name in CASES:
+        case = build_case(name)
+        ref = gate.load_reference(name)
+        assert case.n_params == ref["n_params"] and abs(case.e_hf - ref["e_hf"]) < 1e-10
+
+
+@pytest.mark.parametrize("name", ["lih-12q", "h2o-16q"])
+def test_shipped_case_matches_pyscf_up_to_orbital_signs(name):
+    case, fresh = build_case(name), build_case(name, from_pyscf=True)
+    assert fresh.excitations == case.excitations and fresh.hf_index == case.hf_index
+    assert abs(fresh.e_core - case.e_core) < 1e-10 and abs(fresh.e_hf - case.e_hf) < 1e-10
+    assert np.allclose(np.abs(fresh.h1), np.abs(case.h1), atol=1e-8)
+    assert np.allclose(np.abs(fresh.h2), np.abs(case.h2), atol=1e-8)
+
+
+def test_reference_passes_gate_h2o_16q():
+    # failed when the case was rebuilt with PySCF on a machine whose LAPACK picks other orbital signs
+    assert main(["run", "h2o-16q"]) == 0
+
+
+@pytest.mark.slow
+def test_reference_passes_gate_h2o_20q():
+    assert main(["run", "h2o-20q"]) == 0

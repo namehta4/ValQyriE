@@ -23,6 +23,9 @@ from pathlib import Path
 
 import numpy as np
 
+# the cases as files (see build_case)
+DATA_DIR = Path(__file__).parent / "data"
+
 # name -> how to build it; "role" says where it is used in the challenge
 CASES = {
     "lih-12q": {"role": "development", "molecule": "LiH", "basis": "sto-3g", "active": "default",
@@ -102,16 +105,31 @@ class CaseData:
         e_fci = meta.get("e_fci")
         return cls(meta["name"], meta["description"], meta["n_orbitals"], meta["n_alpha"], meta["n_beta"],
                    arr["h1"], arr["h2"], meta["e_core"], excs, arr["hf_occupation"], meta["e_hf"],
-                   float("nan") if e_fci is None else e_fci)
+                   float("nan") if e_fci is None else e_fci,
+                   meta={k: meta[k] for k in ("role", "molecule") if k in meta})
 
 
-def build_case(name: str, compute_fci: bool | None = None) -> CaseData:
-    """Build a named case from PySCF (deterministic). The exact energy is computed unless the case
-    says otherwise (the 28-qubit case: 11.8M determinants) or ``compute_fci`` overrides it."""
-    from qcore import MolecularProblem
-    from VQE.ansatz import UCCSD
+def build_case(name: str, compute_fci: bool | None = None, from_pyscf: bool = False) -> CaseData:
+    """A named case, loaded from ``bench/data/<name>.npz``: the integrals the stored reference
+    answers were computed from, identical on every machine.
+
+    ``from_pyscf=True`` builds the case afresh instead. That agrees with the stored one only up to
+    the sign of each orbital: LAPACK builds (Accelerate, OpenBLAS, MKL) return eigenvectors with
+    different signs, and an excitation's parameter changes sign with its orbitals, so a rebuilt case
+    need not reproduce the reference points. The exact energy is then computed unless the case says
+    otherwise (the 28-qubit case: 11.8M determinants) or ``compute_fci`` overrides it."""
     if name not in CASES:
         raise ValueError(f"unknown case {name!r}; choose from {', '.join(CASES)}")
+    if not from_pyscf:
+        case = CaseData.load(DATA_DIR / f"{name}.npz")
+        if compute_fci and np.isnan(case.e_fci):
+            from pyscf import fci
+            case.e_fci = float(fci.direct_spin1.FCI().kernel(case.h1, case.h2, case.n_orbitals,
+                                                             (case.n_alpha, case.n_beta),
+                                                             ecore=case.e_core)[0])
+        return case
+    from qcore import MolecularProblem
+    from VQE.ansatz import UCCSD
     spec = CASES[name]
     fci = spec.get("fci", True) if compute_fci is None else compute_fci
     p = MolecularProblem.from_library(spec["molecule"], basis=spec["basis"], active_space=spec["active"],

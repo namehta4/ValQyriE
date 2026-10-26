@@ -84,7 +84,7 @@ ValQyriE/
 ├── VQE/              VQE, ansatze, ADAPT-VQE (CEO, TETRIS), orbital-optimized VQE, CLI (python -m VQE)
 ├── GQE/              GPT model, operator pool, GQE training loop, CLI (python -m GQE)
 ├── stress/           verified CPU stress test + system ceilings (python -m stress)
-├── bench/            SCC performance-challenge harness: cases, plug-in interface, gate (python -m bench)
+├── bench/            SCC performance-challenge harness: cases (data/), plug-in interface, gate (python -m bench)
 ├── examples/         benchmark.py, dissociation_curve.py, stress/*.json case files
 └── tests/            validation suite (pytest)
 ```
@@ -631,7 +631,11 @@ Kokkos or SYCL code through pybind11, ctypes or cffi. `case` (`bench.cases.CaseD
 active-space integrals `h1`, `h2` (chemists' notation), `e_core`, the excitation list in parameter
 order and the Hartree-Fock occupation. The exact definition of the circuit (Jordan-Wigner,
 interleaved spin orbitals, operator ordering) is in the docstring of `bench/cases.py` and in every
-exported `.json`. Setup in `__init__` is timed separately. Under `--mpi` every rank calls
+exported `.json`. The cases ship as files in `bench/data/`: the exact integrals the reference
+answers were computed from, so every machine solves the same problem bit for bit. (Rebuilding a
+case with PySCF, `export --from-pyscf`, gives the same molecule, but depending on the LAPACK library
+some orbitals come out with the opposite sign, which changes the parameters' meaning, and the
+stored answers no longer apply.) Setup in `__init__` is timed separately. Under `--mpi` every rank calls
 `energy_and_gradient` with the same θ and must return the complete result.
 
 **The correctness gate** (`bench/gate.py`): at three stored parameter points (θ = 0, and two

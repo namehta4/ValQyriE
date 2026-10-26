@@ -1,0 +1,22 @@
+{
+ "name": "h2o-16q",
+ "description": "H2O / 6-31G, (8e, 8o)",
+ "n_orbitals": 8,
+ "n_qubits": 16,
+ "n_alpha": 4,
+ "n_beta": 4,
+ "n_params": 360,
+ "hf_index": 255,
+ "e_core": -52.12171080601368,
+ "e_hf": -75.98397418242462,
+ "e_fci": -76.02472816007631,
+ "arrays": {
+  "h1": "[p, q]",
+  "h2": "[p, q, r, s] = (pq|rs), chemists' notation",
+  "excitations": "[k, (o1, o2, v1, v2)] spin-orbital indices, -1 = unused",
+  "hf_occupation": "[j] occupation of spin orbital / qubit j"
+ },
+ "definition": "Benchmark cases: a language-neutral definition of the problem every implementation solves.\n\nA case is a UCCSD circuit on the Hartree-Fock state of a molecular Hamiltonian in an active\nspace, under the Jordan-Wigner encoding:\n\n* Spin orbitals are interleaved: qubit 2p = spatial orbital p, spin up (alpha); qubit 2p + 1 =\n  orbital p, spin down (beta). Basis state |b>: bit j of the integer b = occupation of qubit j.\n* H = e_core + sum_pq,s h1[p,q] a+_ps a_qs\n        + 1/2 sum_pqrs,st h2[p,q,r,s] a+_ps a+_rt a_st a_qs      (h2 in chemists' notation (pq|rs))\n* Fermionic operators: a+_j = Z_0 ... Z_{j-1} (X_j - i Y_j)/2 (Jordan-Wigner).\n* Initial state: the Hartree-Fock determinant |HF> (``hf_occupation``; the integer ``hf_index``).\n* Excitation k = (occupied, virtual) spin-orbital tuples, one or two of each:\n  T_k = a+_{v1} [a+_{v2}] [a_{o2}] a_{o1},  G_k = T_k - T_k^dagger  (anti-Hermitian).\n* Circuit: |psi(theta)> = exp(theta_{K-1} G_{K-1}) ... exp(theta_1 G_1) exp(theta_0 G_0) |HF>,\n  i.e. excitation 0 acts first. Each exponential is exact (no Trotter error inside it).\n* Task: E(theta) = <psi|H|psi> and its gradient dE/dtheta_k, in double precision.\n",
+ "role": "development",
+ "molecule": "H2O(r=0.9578)"
+}

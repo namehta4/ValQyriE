@@ -90,7 +90,7 @@ def cmd_list(args):
 
 
 def cmd_export(args):
-    case = build_case(args.case)
+    case = build_case(args.case, from_pyscf=args.from_pyscf)
     path = case.save(args.output)
     print(f"wrote {path} and {path.with_suffix('.json')}  ({case.n_qubits} qubits, {case.n_params} parameters)")
     return 0
@@ -189,6 +189,8 @@ def main(argv=None):
     ex = sub.add_parser("export", help="write a case as .npz + .json")
     ex.add_argument("case", choices=list(CASES))
     ex.add_argument("-o", "--output", default="cases")
+    ex.add_argument("--from-pyscf", action="store_true",
+                    help="rebuild with PySCF instead of copying bench/data (orbital signs may differ)")
     for name in ("run", "vqe"):
         r = sub.add_parser(name, help={"run": "correctness gate + timing of energy_and_gradient",
                                        "vqe": "full UCCSD optimization, time to solution"}[name])
