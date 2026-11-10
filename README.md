@@ -609,8 +609,11 @@ python -m bench list                                        # the cases
 python -m bench run h2o-16q                                 # reference code: correctness gate + timing
 python -m bench run h2o-24q --impl mycode.py:MyEvaluator -o result.json
 python -m bench vqe h2o-24q --impl mycode.py:MyEvaluator    # full optimization, time to solution
+python -m bench run h2o-24q --point 2 -o baseline-24q.json   # one evaluation: the 24-qubit baseline
+python -m bench run --case-file hidden/x.npz --impl mycode.py:MyEvaluator -o hidden.json
 python -m bench export h2o-24q -o cases/                    # .npz + .json for non-Python codes
 mpirun -np 8 python -m bench run anthracene-28q --impl mymod:Dist --mpi
+python -m bench submit-check team07/valqyrie                # check a submission tree (--layout: the spec)
 ```
 
 | case | role | qubits | parameters |
@@ -641,13 +644,20 @@ stored answers no longer apply.) Setup in `__init__` is timed separately. Under 
 **The correctness gate** (`bench/gate.py`): at three stored parameter points (θ = 0, and two
 random points), the energy must match to 1e-10 Ha and every gradient component to 1e-8, and the
 energy must not fall below E_FCI. `bench vqe` runs BFGS from θ = 0 with tolerance 1e-10 (the
-settings of `VQE`) and must reach the stored final energy to 1e-7 Ha. Judges run a hidden case with
-`--case-file` and `--reference`.
+settings of `VQE`) and must reach the stored final energy to 1e-7 Ha. For the hidden case the
+answers stay with the judges: `--case-file` without `--reference` records the energies and
+gradients at the same three points (gate `UNCHECKED`), and the judges check the report. Every
+report carries the raw results and a fingerprint of the case it was computed on.
+
+**Submissions** go in one folder per ministage, `<team>/valqyrie/stage<S>/ministage<M>/`, with the
+files `python -m bench submit-check --layout` lists; ministages can be handed in in any order.
+`python -m bench submit-check <tree>` checks a tree before it is uploaded.
 
 The reference implementation (`bench.interface.ReferenceEvaluator`) is the ValQyriE code as it
 stands: the full 2ⁿ statevector, with a sparse Hamiltonian up to 20 qubits and the matrix-free
-Pauli-sum product above. On the 24-qubit case it needs roughly 45 minutes per evaluation on one
-core, and the 28-qubit case is out of its reach: that is the baseline the stages improve on.
+Pauli-sum product above. On the 24-qubit case one evaluation takes hours on one core (about 6 h
+at a random point on a Xeon Gold 6548Y+; θ = 0 is several times faster), and the 28-qubit case is
+out of its reach: that is the baseline the stages improve on. Time it with `--point 2`.
 
 ## Limits and scope
 

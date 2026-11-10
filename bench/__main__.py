@@ -3,9 +3,12 @@
     python -m bench list                                   # the cases
     python -m bench export h2o-24q -o cases/                # case files for non-Python codes
     python -m bench run h2o-16q                             # reference code, correctness gate + timing
+    python -m bench run h2o-24q --point 2 -o baseline.json  # one evaluation: the 24-qubit baseline
+    python -m bench run --case-file hidden/x.npz --impl ...  # no answers: results recorded for the judges
     python -m bench run h2o-24q --impl mycode.py:MyEvaluator -o result.json
     mpirun -np 8 python -m bench run anthracene-28q --impl my.mod:Dist --mpi
     python -m bench vqe h2o-24q --impl mycode.py:MyEvaluator   # full UCCSD optimization (stage 6)
+    python -m bench submit-check team07/valqyrie            # check a submission tree (--layout: the spec)
 
 An implementation provides ``energy_and_gradient(theta)``; see ``bench.interface``. Every run
 checks the energy and gradient at the reference parameter points before any time is reported.
@@ -89,6 +92,22 @@ def cmd_list(args):
     return 0
 
 
+def cmd_submit_check(args):
+    from . import submission
+    if args.layout or not args.root:
+        print(submission.layout())
+        return 0
+    res = submission.check_tree(args.root)
+    if not res:
+        print(f"{args.root}: no stage<S>/ministage<M>/ folders found")
+        return 1
+    for ms, problems in res.items():
+        print(f"{ms:4s} " + ("ok" if not problems else "PROBLEMS"))
+        for pr in problems:
+            print(f"       {pr}")
+    return 1 if any(res.values()) else 0
+
+
 def cmd_export(args):
     case = build_case(args.case, from_pyscf=args.from_pyscf)
     path = case.save(args.output)
@@ -101,44 +120,61 @@ def cmd_run(args):
     log = _log(comm)
     case = _case(args)
     ref = gate.load_reference(case.name, args.reference)
-    if ref is None:
-        sys.exit(f"error: no reference answers for {case.name} (bench/references/{case.name}.json); "
-                 "judges supply them with --reference for the hidden case")
+    if ref is None and not args.case_file:
+        sys.exit(f"error: no reference answers for {case.name} (bench/references/{case.name}.json)")
     log(f"case            {case.name}: {case.description}  ({case.n_qubits} qubits, {case.n_params} parameters)")
+    if ref is None:
+        log("reference       none: results are recorded for the judges, who check them (the hidden case)")
     impl, setup = _make(args, case, comm, log)
-    points = ref["points"][: args.points] if args.points else ref["points"]
+    points = list(enumerate(ref["points"] if ref else gate.standard_points(case.n_params)))
+    if args.point is not None:
+        points = [points[args.point]]
+    elif args.points:
+        points = points[: args.points]
     results, times, passed = [], [], True
-    for i, pt in enumerate(points):
+    for i, pt in points:
         comm.barrier()
         t0 = time.perf_counter()
         e, g = impl.energy_and_gradient(pt["theta"].copy())
         comm.barrier()
         dt = time.perf_counter() - t0
-        chk = gate.check_point(e, g, pt, ref.get("e_fci"))
-        passed &= chk["passed"]
+        g = np.asarray(g, float)
         times.append(dt)
-        results.append({"point": i, "time_s": dt, **chk})
-        log(f"point {i}         {dt:10.3f} s   dE = {chk['energy_error']:.1e}   dg = {chk['gradient_error']:.1e}   "
-            f"{'PASS' if chk['passed'] else 'FAIL: ' + '; '.join(chk['reasons'])}")
+        rec = {"point": i, "scale": pt["scale"], "seed": pt["seed"], "time_s": dt, "energy": float(e),
+               "gradient": g.tolist()}
+        if ref:
+            chk = gate.check_point(e, g, pt, ref.get("e_fci"))
+            passed &= chk["passed"]
+            rec.update(chk)
+            log(f"point {i}         {dt:10.3f} s   dE = {chk['energy_error']:.1e}   dg = {chk['gradient_error']:.1e}   "
+                f"{'PASS' if chk['passed'] else 'FAIL: ' + '; '.join(chk['reasons'])}")
+        else:
+            log(f"point {i}         {dt:10.3f} s   E = {e:.12f}   recorded")
+        results.append(rec)
     timed = []
     for _ in range(args.repeats):
         comm.barrier()
         t0 = time.perf_counter()
-        impl.energy_and_gradient(points[-1]["theta"].copy())
+        impl.energy_and_gradient(points[-1][1]["theta"].copy())
         comm.barrier()
         timed.append(time.perf_counter() - t0)
     all_t = times + timed
-    summary = {"case": case.name, "n_qubits": case.n_qubits, "n_params": case.n_params,
-               "impl": args.impl or "reference", "ranks": comm.size, "setup_s": setup,
+    verdict = "UNCHECKED" if ref is None else "PASS" if passed else "FAIL"
+    summary = {"case": case.name, "case_sha256": case.fingerprint(), "n_qubits": case.n_qubits,
+               "n_params": case.n_params, "impl": args.impl or "reference", "ranks": comm.size, "setup_s": setup,
                "eval_s_min": min(all_t), "eval_s_median": float(np.median(all_t)), "evaluations": len(all_t),
-               "gate": "PASS" if passed else "FAIL", "points": results, "system": _system(),
+               "repeats": args.repeats,
+               # the scored time: every evaluation at the last checked point (its gate run + --repeats)
+               "timed_point": points[-1][0], "eval_s_timed": float(np.median(all_t[len(times) - 1:])),
+               "eval_s_timed_all": all_t[len(times) - 1:],
+               "gate": verdict, "points": results, "system": _system(),
                "git_commit": _git_commit(), "time": time.strftime("%Y-%m-%dT%H:%M:%S%z")}
     log(f"\nenergy+gradient {summary['eval_s_min']:.3f} s (best of {len(all_t)}), median {summary['eval_s_median']:.3f} s")
-    log(f"correctness     {summary['gate']}" + ("" if passed else "  -- times do not count until the gate passes"))
+    log(f"correctness     {verdict}" + ("  -- times do not count until the gate passes" if verdict == "FAIL" else ""))
     if args.output and comm.rank == 0:
         Path(args.output).write_text(json.dumps(summary, indent=1, default=str))
         log(f"report written to {args.output}")
-    return 0 if passed else 1
+    return 1 if verdict == "FAIL" else 0
 
 
 def cmd_vqe(args):
@@ -164,7 +200,7 @@ def cmd_vqe(args):
     comm.barrier()
     wall = time.perf_counter() - t0
     e = float(res.fun)
-    out = {"case": case.name, "impl": args.impl or "reference", "ranks": comm.size, "setup_s": setup,
+    out = {"case": case.name, "case_sha256": case.fingerprint(), "impl": args.impl or "reference", "ranks": comm.size, "setup_s": setup,
            "time_to_solution_s": wall, "energy": e, "evaluations": nfev[0], "iterations": int(res.nit),
            "gradient_norm": float(np.linalg.norm(res.jac)), "e_fci": case.e_fci, "system": _system(),
            "git_commit": _git_commit()}
@@ -191,6 +227,9 @@ def main(argv=None):
     ex.add_argument("-o", "--output", default="cases")
     ex.add_argument("--from-pyscf", action="store_true",
                     help="rebuild with PySCF instead of copying bench/data (orbital signs may differ)")
+    sc = sub.add_parser("submit-check", help="check a submission tree before uploading it")
+    sc.add_argument("root", nargs="?", help="the tree, e.g. team07/valqyrie")
+    sc.add_argument("--layout", action="store_true", help="print the expected tree")
     for name in ("run", "vqe"):
         r = sub.add_parser(name, help={"run": "correctness gate + timing of energy_and_gradient",
                                        "vqe": "full UCCSD optimization, time to solution"}[name])
@@ -202,13 +241,16 @@ def main(argv=None):
         r.add_argument("-o", "--output", help="write a JSON report")
         if name == "run":
             r.add_argument("--points", type=int, default=0, help="check only the first N reference points")
+            r.add_argument("--point", type=int, choices=range(len(gate.POINTS)),
+                           help="check and time only this point (e.g. 2 for a slow baseline)")
             r.add_argument("--repeats", type=int, default=0, help="extra timed evaluations after the gate")
         else:
             r.add_argument("--maxiter", type=int, default=1000)
     args = ap.parse_args(argv)
     if args.cmd in ("run", "vqe") and not (args.case or args.case_file):
         ap.error("give a case name or --case-file")
-    return {"list": cmd_list, "export": cmd_export, "run": cmd_run, "vqe": cmd_vqe}[args.cmd](args)
+    return {"list": cmd_list, "export": cmd_export, "run": cmd_run, "vqe": cmd_vqe,
+            "submit-check": cmd_submit_check}[args.cmd](args)
 
 
 if __name__ == "__main__":

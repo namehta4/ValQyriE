@@ -92,3 +92,52 @@ def test_reference_passes_gate_h2o_16q():
 @pytest.mark.slow
 def test_reference_passes_gate_h2o_20q():
     assert main(["run", "h2o-20q"]) == 0
+
+
+def test_run_without_reference_records_results(tmp_path):
+    # the hidden case: no answers on the team's machine, so results are recorded for the judges
+    case = build_case("lih-12q")
+    case.name = "hidden-x"
+    case.save(tmp_path)
+    out = tmp_path / "r.json"
+    assert main(["run", "--case-file", str(tmp_path / "hidden-x.npz"), "-o", str(out)]) == 0
+    rep = json.loads(out.read_text())
+    assert rep["gate"] == "UNCHECKED" and rep["case_sha256"] == case.fingerprint()
+    ref = gate.load_reference("lih-12q")  # same integrals, so the recorded results match its answers
+    for rec, pt in zip(rep["points"], ref["points"]):
+        assert gate.check_point(rec["energy"], rec["gradient"], pt)["passed"]
+
+
+def test_run_single_point(tmp_path):
+    out = tmp_path / "r.json"
+    assert main(["run", "lih-12q", "--point", "2", "--repeats", "2", "-o", str(out)]) == 0
+    rep = json.loads(out.read_text())
+    assert [p["point"] for p in rep["points"]] == [2] and rep["timed_point"] == 2
+    assert rep["evaluations"] == 3 and rep["repeats"] == 2
+
+
+def _report(case, gate_="PASS", repeats=4, ranks=1, sha=None):
+    pts = [{"point": i, "energy": 0.0, "gradient": []} for i in range(3)]
+    return {"case": case, "case_sha256": sha or build_case(case).fingerprint(), "points": pts,
+            "gate": gate_, "repeats": repeats, "ranks": ranks, "eval_s_timed": 1.0}
+
+
+def test_submit_check(tmp_path, capsys):
+    from bench.submission import check_tree
+    d = tmp_path / "stage2" / "ministage1"
+    d.mkdir(parents=True)
+    (d / "fixed.json").write_text(json.dumps(_report("h2o-24q")))
+    (d / "hidden.json").write_text(json.dumps(_report("lih-12q", gate_="UNCHECKED", repeats=0) | {"case": "hidden-a"}))
+    (d / "code.tar.gz").write_bytes(b"x")
+    (d / "notes.md").write_text("notes")
+    assert check_tree(tmp_path) == {"2.1": []}
+    assert main(["submit-check", str(tmp_path)]) == 0
+
+    (d / "fixed.json").write_text(json.dumps(_report("h2o-24q", gate_="FAIL", repeats=1, sha="0")))
+    (d / "notes.md").unlink()
+    (tmp_path / "stage9" / "ministage1").mkdir(parents=True)
+    res = check_tree(tmp_path)
+    text = " ".join(res["2.1"])
+    assert "gate FAIL" in text and "--repeats 4" in text and "differs from the shipped" in text
+    assert "notes.md: missing" in text and res["?"] == ["unknown folder stage9/ministage1"]
+    assert main(["submit-check", str(tmp_path)]) == 1

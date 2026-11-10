@@ -12,6 +12,16 @@ VQE_ENERGY_TOL = 1e-7  # final energy of a full optimization (paths differ by ro
 
 REFERENCE_DIR = Path(__file__).parent / "references"
 
+# the parameter points every case is checked at: theta = scale * N(0, 1) with a fixed seed
+POINTS = [(0.0, 0), (0.02, 101), (0.2, 202)]
+
+
+def standard_points(n_params: int) -> list[dict]:
+    """The checked points of a case without stored answers (the hidden case): the judges' answers
+    are computed at the same points."""
+    return [{"scale": scale, "seed": seed,
+             "theta": scale * np.random.default_rng(seed).standard_normal(n_params)} for scale, seed in POINTS]
+
 
 def load_reference(case_name: str, path=None) -> dict | None:
     p = Path(path) if path else REFERENCE_DIR / f"{case_name}.json"

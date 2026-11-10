@@ -17,6 +17,7 @@ space, under the Jordan-Wigner encoding:
 """
 from __future__ import annotations
 
+import hashlib
 import json
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -69,6 +70,15 @@ class CaseData:
     @property
     def hf_index(self) -> int:
         return int(sum(1 << j for j, o in enumerate(self.hf_occupation) if o))
+
+    def fingerprint(self) -> str:
+        """SHA-256 of everything that defines the problem; reports carry it so a result can be
+        matched to the case it was computed on."""
+        h = hashlib.sha256()
+        for a in (self.h1, self.h2, [self.e_core], self.hf_occupation):
+            h.update(np.ascontiguousarray(a, dtype=np.float64).tobytes())
+        h.update(json.dumps([list(map(list, e)) for e in self.excitations]).encode())
+        return h.hexdigest()
 
     # ------------------------------------------------------------- files
     def save(self, directory) -> Path:

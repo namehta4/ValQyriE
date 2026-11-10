@@ -384,6 +384,7 @@ def main(argv=None):
     sub.add_parser("info", parents=[common], help="show hardware and estimated ceilings")
     pk = sub.add_parser("peak", parents=[common], help="measure DGEMM / bandwidth ceilings")
     pk.add_argument("--peak-seconds", type=float, default=4.0)
+    pk.add_argument("-o", "--output", help="write the ceilings as JSON")
     r = sub.add_parser("run", parents=[common], help="verified stress run")
     r.add_argument("--duration", type=float, default=60.0, help="seconds per phase")
     r.add_argument("--mode", choices=["phases", "mixed"], default="phases",
@@ -416,7 +417,13 @@ def main(argv=None):
     print_info(si, theo, peaks.capacity(si), log)
     if args.cmd == "peak":
         log("\n== ceilings: measuring what this system can achieve ==")
-        print_peaks(peaks.measure(si, select_cpus(si, args.workers), seconds=args.peak_seconds, log=log), theo, log)
+        measured = peaks.measure(si, select_cpus(si, args.workers), seconds=args.peak_seconds, log=log)
+        print_peaks(measured, theo, log)
+        if args.output:
+            with open(args.output, "w") as fh:
+                json.dump({"version": 1, "time": time.strftime("%Y-%m-%dT%H:%M:%S%z"), "system": si.as_dict(),
+                           "theoretical": theo, "measured": measured}, fh, indent=1, default=str)
+            log(f"report written to {args.output}")
     return 0
 
 
