@@ -43,6 +43,8 @@ FIXED = Item("fixed.json", "run", "bench run h2o-24q --impl ... --repeats 4 -o f
              case="h2o-24q", min_repeats=4)
 HIDDEN = Item("hidden.json", "run", "bench run --case-file <hidden>.npz --impl ... -o hidden.json", case="hidden")
 TIMED = (FIXED, HIDDEN, CODE, NOTES)
+MULTI_FIXED = Item("fixed.json", "run", "bench run h2o-24q --mpi --impl ... --repeats 4 -o fixed.json on all your GPUs",
+                   case="h2o-24q", min_repeats=4, min_ranks=2)
 
 
 def metrics(help, *keys, bools=()):
@@ -78,12 +80,11 @@ SPEC: dict[str, tuple[Item, ...]] = {
                  case="h2o-24q", min_ranks=2, max_ranks=2),
             Item("fixed-allgpu.json", "run", "bench run h2o-24q --mpi on all your GPUs", case="h2o-24q", min_ranks=2),
             HIDDEN, CODE, NOTES),
-    "5.2": TIMED + (metrics("share of run time spent communicating (0-1)", "comm_fraction"),),
-    "5.3": (Item("fixed-1gpu.json", "run", "bench run h2o-24q --repeats 4 on 1 GPU", case="h2o-24q",
-                 min_repeats=4, max_ranks=1),
-            Item("fixed-allgpu.json", "run", "bench run h2o-24q --mpi --repeats 4 on all your GPUs",
-                 case="h2o-24q", min_repeats=4, min_ranks=2),
-            HIDDEN, CODE, NOTES),
+    # 5.2 and 5.3: the same code on all your GPUs, 5.2 with overlap switched off and 5.3 with it on
+    "5.2": (MULTI_FIXED, HIDDEN, CODE, NOTES,
+            metrics("share of run time spent communicating, overlap off (0-1)", "comm_fraction"),
+            Item("profile", "dir", "profiler trace the comm_fraction was measured from")),
+    "5.3": (MULTI_FIXED, HIDDEN, CODE, NOTES),
     "5.4": (Item("anthracene.json", "run", "bench run anthracene-28q --mpi --repeats 4 on all your GPUs",
                  case="anthracene-28q", min_repeats=4),
             HIDDEN, CODE, NOTES),
